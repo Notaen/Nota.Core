@@ -1,4 +1,4 @@
-use std::{path::PathBuf, str::FromStr as _};
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::{Context as _, Ok, Result};
 use chrono::Utc;
@@ -9,6 +9,7 @@ use crate::base_dir;
 
 pub mod db;
 pub mod manager;
+pub mod markdown;
 mod participant;
 
 struct Session {
@@ -19,6 +20,10 @@ struct Session {
     conn: SqliteConnection,
 }
 
+fn schedule_path(session_id: &str) -> PathBuf {
+    base_dir().join("persona").join(format!("{}_tasks.md", session_id))
+}
+
 impl Session {
     async fn load(path: &PathBuf) -> Result<Self> {
         let url = format!("sqlite://{}", path.to_str().unwrap());
@@ -26,7 +31,9 @@ impl Session {
 
         let metadata = Metadata::get(&mut conn).await?;
         let messages = Message::load_all(&mut conn).await?;
-        let schedules = Schedule::load_all(&mut conn).await?;
+
+        let md_path = schedule_path(&metadata.session_id);
+        let schedules = markdown::load(&md_path)?;
 
         Ok(Self {
             metadata,
@@ -47,16 +54,13 @@ impl Session {
         let url = format!("sqlite://{}", file_path.to_str().unwrap());
         let options = SqliteConnectOptions::from_str(&url)?.create_if_missing(true);
 
-        // 4. 建立连接
         let mut conn = SqliteConnection::connect_with(&options).await?;
 
-        // 5. 运行迁移（建表）
         sqlx::migrate!("./migrations")
             .run(&mut conn)
             .await
             .context("Failed to run migrations")?;
 
-        // 6. 构建初始 metadata
         let now = Utc::now();
         let metadata = Metadata {
             session_id: session_id.to_string(),
@@ -65,23 +69,24 @@ impl Session {
             archive_at: None,
         };
 
-        // 7. 插入 metadata 到数据库
         sqlx::query(
             "INSERT INTO session_meta (session_id, creator, create_time, archive_at) VALUES (?, ?, ?, ?)",
         )
         .bind(&metadata.session_id)
         .bind(&metadata.creator)
-        .bind(metadata.create_time.timestamp()) // DateTime -> i64 (Unix 秒)
-        .bind::<Option<i64>>(None) // archive_at = NULL
+        .bind(metadata.create_time.timestamp())
+        .bind::<Option<i64>>(None)
         .execute(&mut conn)
         .await
         .context("Failed to insert session metadata")?;
 
-        // 8. 构造 Session 实例
+        let md_path = schedule_path(session_id);
+        markdown::save(&md_path, &[])?;
+
         Ok(Self {
             metadata,
-            messages: Vec::new(),  // 新会话无消息
-            schedules: Vec::new(), // 新会话无计划
+            messages: Vec::new(),
+            schedules: Vec::new(),
             conn,
         })
     }
@@ -95,11 +100,10 @@ impl Session {
         .bind(&msg.timestamp)
         .bind(&msg.content)
         .bind(&msg.role)
-        .bind(&msg.tag) // Option<String> 自动映射为 NULL
+        .bind(&msg.tag)
         .fetch_one(&mut self.conn)
         .await?;
 
-        // Set right id and push new message
         msg.id = id;
         self.messages.push(msg);
 

@@ -44,27 +44,14 @@ impl Message {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 pub struct Schedule {
-    /// schedule id. Set to -1 only when used for insertion
     pub id: i64,
     pub message: String,
     pub next_run_at: i64,
-    pub interval_seconds: Option<i64>, // NULL -> 单次任务
-    pub status: String,                // "active", "paused", "completed"
+    pub interval_seconds: Option<i64>,
+    pub status: String,
     pub created_at: i64,
-}
-
-impl Schedule {
-    pub async fn load_all(conn: &mut SqliteConnection) -> Result<Vec<Self>> {
-        let schedules = sqlx::query_as(
-            "SELECT id, message, next_run_at, interval_seconds, status, created_at FROM schedules",
-        )
-        .fetch_all(conn)
-        .await?;
-
-        Ok(schedules)
-    }
 }
 
 // scacdcccccccccccccccccccccccccccc
