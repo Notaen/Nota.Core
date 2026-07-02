@@ -29,6 +29,8 @@ pub fn load() -> Result<()> {
 
     let mut guard = CONFIG.write().unwrap();
     *guard = Some(config);
+    
+    tracing::info!("Config loaded");
     Ok(())
 }
 

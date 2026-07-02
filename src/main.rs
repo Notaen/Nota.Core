@@ -1,9 +1,10 @@
 use std::fs::create_dir_all;
 
 use anyhow::Result;
-use nota_core::{base_dir, config};
+use nota_core::{base_dir, config, connect, session};
 use time::macros::format_description;
-use tracing::{debug, info};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 use tracing_appender::{
     non_blocking,
     rolling::{RollingFileAppender, Rotation},
@@ -16,6 +17,7 @@ use tracing_subscriber::{
 
 fn ensure_dir() -> Result<()> {
     create_dir_all(base_dir())?;
+    create_dir_all(base_dir().join(".logs"))?;
     create_dir_all(base_dir().join("persona"))?;
     create_dir_all(base_dir().join("sessions"))?;
     Ok(())
@@ -60,11 +62,20 @@ fn init_tracing() -> Result<non_blocking::WorkerGuard> {
     Ok(guard)
 }
 
-fn main() -> Result<()> {
-    let _guard = init_tracing()?;
+#[tokio::main]
+async fn main() -> Result<()> {
     ensure_dir()?;
-    debug!("Dir ensured");
+    let _guard = init_tracing()?;
     config::load()?;
-    info!("Config loaded");
+
+    let cancel_token = CancellationToken::new();
+
+    info!("Nota.Core start");
+    session::manager::load().await?;
+    let _ = tokio::spawn(connect::serve(cancel_token.clone()));
+
+    cancel_token.cancelled().await;
+    info!("Nota.Core is stopping");
+
     Ok(())
 }
