@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT NOT NULL,
     creator TEXT NOT NULL,
-    create_time INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
     archive_at INTEGER
 );
 
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tag TEXT
 );
 
--- schedule 表：支持单次和循环任务
+-- schedules 表：支持单次和循环任务
 CREATE TABLE IF NOT EXISTS schedules (
     id INTEGER PRIMARY KEY,                     -- 自增主键
     message TEXT NOT NULL,                      -- 要推送的消息内容
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 
 -- 关键索引：只查询 active 且到期的任务（利用部分索引）
 CREATE INDEX IF NOT EXISTS idx_schedule_due 
-ON schedule(next_run_at, status) 
+ON schedules(next_run_at, status) 
 WHERE status = 'active';
 
 -- 给 messages 的 timestamp 创建索引

@@ -13,7 +13,7 @@ async fn log_request(req: Request, next: middleware::Next) -> Response {
 }
 
 mod admin;
-mod sessions;
+mod session;
 
 async fn root() -> (StatusCode, &'static str) {
     (StatusCode::NOT_FOUND, "Not Found")
@@ -38,7 +38,7 @@ pub async fn serve(cancel_token: CancellationToken) {
         .route("/", get(root))
         .route("/health", get(health))
         .nest("/admin", admin::router(cancel_token.clone()))
-        .nest("/sessions", sessions::router())
+        .nest("/session", session::router())
         .layer(middleware::from_fn(log_request));
 
     let listener = TcpListener::bind("127.0.0.1:2349").await.unwrap();

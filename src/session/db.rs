@@ -1,19 +1,19 @@
-use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, prelude::FromRow};
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Deserialize, Serialize, FromRow)]
 pub struct Metadata {
     pub session_id: String,
     pub creator: String,
-    pub create_time: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
     pub archive_at: Option<DateTime<Utc>>,
 }
 
 impl Metadata {
-    pub async fn get(conn: &mut SqliteConnection) -> Result<Self> {
+    pub async fn get(conn: &mut SqliteConnection) -> Result<Self, sqlx::Error> {
         let row: Metadata = sqlx::query_as(
-            "SELECT session_id, creator, create_time, archive_at FROM session_meta LIMIT 1",
+            "SELECT session_id, creator, created_at, archive_at FROM session_meta LIMIT 1",
         )
         .fetch_one(conn)
         .await?;
@@ -33,7 +33,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub async fn load_all(conn: &mut SqliteConnection) -> Result<Vec<Self>> {
+    pub async fn load_all(conn: &mut SqliteConnection) -> Result<Vec<Self>, sqlx::Error> {
         let messages = sqlx::query_as(
             "SELECT id, timestamp, content, role, tag FROM messages ORDER BY timestamp",
         )
@@ -56,7 +56,7 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    pub async fn load_all(conn: &mut SqliteConnection) -> Result<Vec<Self>> {
+    pub async fn load_all(conn: &mut SqliteConnection) -> Result<Vec<Self>, sqlx::Error> {
         let schedules = sqlx::query_as(
             "SELECT id, message, next_run_at, interval_seconds, status, created_at FROM schedules",
         )
@@ -65,13 +65,4 @@ impl Schedule {
 
         Ok(schedules)
     }
-}
-
-// scacdcccccccccccccccccccccccccccc
-
-pub async fn run_migrations(
-    conn: &mut SqliteConnection,
-) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!("./migrations").run(conn).await?;
-    Ok(())
 }

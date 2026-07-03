@@ -11,12 +11,12 @@ pub mod db;
 pub mod manager;
 mod participant;
 
-struct Session {
-    metadata: Metadata,
-    messages: Vec<Message>,
-    schedules: Vec<Schedule>,
+pub struct Session {
+    pub metadata: Metadata,
+    pub messages: Vec<Message>,
+    pub schedules: Vec<Schedule>,
 
-    conn: SqliteConnection,
+    pub conn: SqliteConnection,
 }
 
 impl Session {
@@ -24,16 +24,28 @@ impl Session {
         let url = format!("sqlite://{}", path.to_str().unwrap());
         let mut conn = SqliteConnection::connect(&url).await?;
 
-        let metadata = Metadata::get(&mut conn).await?;
-        let messages = Message::load_all(&mut conn).await?;
-        let schedules = Schedule::load_all(&mut conn).await?;
+        let res = (async || {
+            let metadata = Metadata::get(&mut conn).await?;
+            let messages = Message::load_all(&mut conn).await?;
+            let schedules = Schedule::load_all(&mut conn).await?;
 
-        Ok(Self {
-            metadata,
-            messages,
-            schedules,
-            conn,
-        })
+            Ok(Self {
+                metadata,
+                messages,
+                schedules,
+                conn,
+            })
+        })()
+        .await;
+
+        // if let Err(ref e) = res {
+        //     tracing::error!(
+        //         "Failed to load session from {}: {e:?}",
+        //         path.display()
+        //     );
+        // }
+
+        res
     }
 
     pub async fn new(session_id: &str, creator: &str) -> Result<Self> {
@@ -61,17 +73,17 @@ impl Session {
         let metadata = Metadata {
             session_id: session_id.to_string(),
             creator: creator.to_string(),
-            create_time: now,
+            created_at: now,
             archive_at: None,
         };
 
         // 7. 插入 metadata 到数据库
         sqlx::query(
-            "INSERT INTO session_meta (session_id, creator, create_time, archive_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO session_meta (session_id, creator, created_at, archive_at) VALUES (?, ?, ?, ?)",
         )
         .bind(&metadata.session_id)
         .bind(&metadata.creator)
-        .bind(metadata.create_time.timestamp()) // DateTime -> i64 (Unix 秒)
+        .bind(metadata.created_at.timestamp()) // DateTime -> i64 (Unix 秒)
         .bind::<Option<i64>>(None) // archive_at = NULL
         .execute(&mut conn)
         .await
