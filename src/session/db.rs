@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, prelude::FromRow};
 
-#[derive(Debug, Deserialize, Serialize, FromRow)]
+#[derive(Debug, Deserialize, Serialize, FromRow, Clone)]
 pub struct Metadata {
     pub session_id: String,
     pub creator: String,

@@ -2,12 +2,13 @@ use axum::{
     Router,
     extract::{Json, Path},
     http::StatusCode,
-    routing::{delete, get, post},
+    response::IntoResponse,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::session::manager;
+use crate::session::SM;
 
 #[derive(Deserialize)]
 struct CreateSession {
@@ -16,91 +17,78 @@ struct CreateSession {
 
 #[derive(Deserialize)]
 struct SetArchiveAt {
-    archive_at: DateTime<Utc>,
+    archive_at: Option<DateTime<Utc>>,
+}
+
+async fn list_metadata() -> impl IntoResponse {
+    let metadata = SM.get().unwrap().list_metadata().await;
+    (StatusCode::OK, Json(metadata))
+}
+
+async fn create_session(Json(payload): Json<CreateSession>) -> impl IntoResponse {
+    let creator = payload.creator.trim().to_string();
+    if creator.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "creator is required"})),
+        );
+    }
+
+    match SM.get().unwrap().new_session(creator).await {
+        Ok(sid) => (
+            StatusCode::CREATED,
+            axum::Json(serde_json::json!({"sid": sid})),
+        ),
+        Err(e) => {
+            tracing::error!("Failed to create session: {e:?}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "Failed to create session"})),
+            )
+        }
+    }
+}
+
+async fn get_archive_at(Path(sid): Path<String>) -> impl IntoResponse {
+    let session_map = SM.get().unwrap().session_map.read().await;
+    let session = session_map.get(&sid);
+    match session {
+        // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`
+        Some(s) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"archive_at": s.metadata.archive_at})),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        ),
+    }
+}
+
+async fn set_archive_at(
+    Path(sid): Path<String>,
+    Json(payload): Json<SetArchiveAt>,
+) -> impl IntoResponse {
+    let mut session_map = SM.get().unwrap().session_map.write().await;
+    let session = session_map.get_mut(&sid);
+    match session {
+        // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`
+        Some(s) => {
+            s.metadata.archive_at = payload.archive_at;
+            StatusCode::OK.into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) fn router() -> Router {
     Router::new()
-        .route(
-            "/",
-            get(async move || {
-                let metadata = manager::SessionManager::list_metadata();
-                (StatusCode::OK, Json(metadata))
-            }),
-        )
-        .route(
-            "/",
-            post(|Json(payload): Json<CreateSession>| async move {
-                let creator = payload.creator.trim().to_string();
-                if creator.is_empty() {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(serde_json::json!({"error": "creator is required"})),
-                    );
-                }
-
-                match manager::SessionManager::new_session(creator).await {
-                    Ok(sid) => (
-                        StatusCode::CREATED,
-                        axum::Json(serde_json::json!({"sid": sid})),
-                    ),
-                    Err(e) => {
-                        tracing::error!("Failed to create session: {e:?}");
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(serde_json::json!({"error": "Failed to create session"})),
-                        )
-                    }
-                }
-            }),
-        )
-        .route(
-            "/{sid}/archive_at",
-            get(|Path(sid): Path<String>| async move {
-                match manager::SessionManager::get_archive_at(&sid) {
-                    Some(archive_at) => (
-                        StatusCode::OK,
-                        Json(serde_json::json!({"archive_at": archive_at})),
-                    ),
-                    None => (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": "Session not found"})),
-                    ),
-                }
-            }),
-        )
-        .route(
-            "/{sid}/archive_at",
-            post(
-                |Path(sid): Path<String>, Json(payload): Json<SetArchiveAt>| async move {
-                    match manager::SessionManager::set_archive_at(&sid, Some(payload.archive_at))
-                        .await
-                    {
-                        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
-                        Err(e) => {
-                            tracing::error!("Failed to set archive_at: {e:?}");
-                            (
-                                StatusCode::NOT_FOUND,
-                                Json(serde_json::json!({"error": e.to_string()})),
-                            )
-                        }
-                    }
-                },
-            ),
-        )
-        .route(
-            "/{sid}/archive_at",
-            delete(|Path(sid): Path<String>| async move {
-                match manager::SessionManager::set_archive_at(&sid, None).await {
-                    Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
-                    Err(e) => {
-                        tracing::error!("Failed to delete archive_at: {e:?}");
-                        (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({"error": e.to_string()})),
-                        )
-                    }
-                }
-            }),
-        )
+        .route("/", get(list_metadata))
+        .route("/", post(create_session))
+        .route("/{sid}/archive_at", get(get_archive_at))
+        .route("/{sid}/archive_at", post(set_archive_at))
 }

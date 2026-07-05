@@ -1,53 +1,44 @@
-use std::{collections::HashMap, path::PathBuf, sync::RwLock};
+use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
 
 use anyhow::Ok;
-use chrono::{DateTime, Utc};
-use sqlx::Connection;
-use tokio::fs;
+use chrono::Utc;
+use tokio::{fs, sync::RwLock};
 
-use crate::{base_dir, session::Session, session::db::Metadata};
+use crate::{
+    BASE_DIR, base_dir,
+    session::{Session, db::Metadata},
+};
 
-static SM: RwLock<Option<SessionManager>> = RwLock::new(None);
+pub static SM: OnceLock<SessionManager> = OnceLock::new();
 
+#[derive(Debug)]
 pub struct SessionManager {
-    pub session_map: HashMap<String, Session>,
+    pub session_map: RwLock<HashMap<String, Session>>,
 }
 
 impl SessionManager {
-    pub async fn new_session(creator: String) -> anyhow::Result<String> {
+    pub async fn new_session(&self, creator: String) -> anyhow::Result<String> {
         let sid = uuid::Uuid::new_v4().to_string();
 
-        let res: anyhow::Result<String> = tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build runtime");
-
-            rt.block_on(async move {
-                let new_session = Session::new(&sid, &creator).await?;
-                let mut guard = SM.write().unwrap();
-                guard
-                    .as_mut()
-                    .unwrap()
-                    .session_map
-                    .insert(sid.clone(), new_session);
-                Ok(sid)
-            })
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-        Ok(res?)
+        let new_session = Session::new(sid.clone(), creator).await?;
+        self.session_map
+            .write()
+            .await
+            .insert(sid.clone(), new_session);
+        Ok(sid)
     }
 
-    async fn archive_session(session_id: &str, session: Session) -> anyhow::Result<()> {
-        session.conn.close().await?;
+    async fn archive_session(&self, session_id: &str) -> anyhow::Result<()> {
+        let mut guard = self.session_map.write().await;
+        let session = guard
+            .remove(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found in memory: {}", session_id))?;
 
-        let src = base_dir()
-            .join("sessions")
-            .join(format!("{}.sqlite", session_id));
-        let dst_dir = base_dir().join("sessions").join("archive");
-        fs::create_dir_all(&dst_dir).await?;
+        let src = session
+            .db_url
+            .strip_prefix("sqlite://")
+            .ok_or_else(|| anyhow::anyhow!("Invalid session db_url: {}", session.db_url))?;
+        let dst_dir = BASE_DIR.join("sessions").join("archive");
         let dst = dst_dir.join(format!("{}.sqlite", session_id));
         fs::rename(&src, &dst).await?;
 
@@ -55,14 +46,12 @@ impl SessionManager {
         Ok(())
     }
 
-    pub async fn archive_expired_sessions() {
+    pub async fn archive_expired_sessions(&self) {
         let expired_ids = {
-            let guard = SM.read().unwrap();
-            let manager = guard.as_ref().unwrap();
+            let session_map = self.session_map.read().await;
 
             let now = Utc::now();
-            manager
-                .session_map
+            session_map
                 .iter()
                 .filter_map(|(id, session)| {
                     let archive_at = session.metadata.archive_at.as_ref()?;
@@ -76,83 +65,17 @@ impl SessionManager {
         };
 
         for session_id in &expired_ids {
-            let session = {
-                let mut guard = SM.write().unwrap();
-                let manager = guard.as_mut().unwrap();
-                manager.session_map.remove(session_id)
-            };
-
-            if let Some(session) = session {
-                if let Err(e) = Self::archive_session(session_id, session).await {
-                    tracing::error!("Failed to archive session {session_id}: {e:?}");
-                }
+            let res = self.archive_session(session_id).await;
+            if let Err(e) = res {
+                tracing::error!("Failed to archive session {session_id}: {e:?}");
             }
         }
     }
 
-    pub fn list_metadata() -> Vec<Metadata> {
-        let guard = SM.read().unwrap();
-        let Some(manager) = guard.as_ref() else {
-            return Vec::new();
-        };
+    pub async fn list_metadata(&self) -> Vec<Metadata> {
+        let session_map = self.session_map.read().await;
 
-        manager
-            .session_map
-            .values()
-            .map(|s| Metadata {
-                session_id: s.metadata.session_id.clone(),
-                creator: s.metadata.creator.clone(),
-                created_at: s.metadata.created_at,
-                archive_at: s.metadata.archive_at,
-            })
-            .collect()
-    }
-
-    pub fn get_archive_at(session_id: &str) -> Option<Option<DateTime<Utc>>> {
-        let guard = SM.read().unwrap();
-        let Some(manager) = guard.as_ref() else {
-            return None;
-        };
-        manager
-            .session_map
-            .get(session_id)
-            .map(|s| s.metadata.archive_at)
-    }
-
-    pub async fn set_archive_at(
-        session_id: &str,
-        archive_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<()> {
-        let session_id = session_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build runtime");
-
-            rt.block_on(async move {
-                let mut guard = SM.write().unwrap();
-                let Some(manager) = guard.as_mut() else {
-                    anyhow::bail!("SessionManager not initialized");
-                };
-                let Some(session) = manager.session_map.get_mut(&session_id) else {
-                    anyhow::bail!("Session not found: {session_id}");
-                };
-
-                session.metadata.archive_at = archive_at;
-
-                let ts = archive_at.map(|dt| dt.timestamp());
-                sqlx::query("UPDATE session_meta SET archive_at = ? WHERE session_id = ?")
-                    .bind::<Option<i64>>(ts)
-                    .bind(&session_id)
-                    .execute(&mut session.conn)
-                    .await?;
-
-                Ok(())
-            })
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?
+        session_map.values().map(|s| s.metadata.clone()).collect()
     }
 }
 
@@ -162,7 +85,7 @@ pub async fn load() -> anyhow::Result<()> {
     // 1. 收集所有异步加载Future
     let load_futures = sqlite_paths
         .into_iter()
-        .map(async move |path| Session::load(&path).await);
+        .map(async move |path| Session::load_from(&path).await);
 
     // 2. 并发等待所有加载完成，得到Vec<Result<Session>>
     let sessions_result = futures_util::future::join_all(load_futures).await;
@@ -179,9 +102,11 @@ pub async fn load() -> anyhow::Result<()> {
         .map(|s| (s.metadata.session_id.clone(), s))
         .collect();
 
-    let mut guard = SM.write().unwrap();
+    SM.set(SessionManager {
+        session_map: RwLock::new(session_map),
+    })
+    .unwrap();
 
-    *guard = Some(SessionManager { session_map });
     tracing::info!("SessionManager loaded");
     Ok(())
 }

@@ -20,6 +20,8 @@ fn ensure_dir() -> Result<()> {
     create_dir_all(base_dir().join(".logs"))?;
     create_dir_all(base_dir().join("persona"))?;
     create_dir_all(base_dir().join("sessions"))?;
+    create_dir_all(base_dir().join("sessions").join("archive"))?;
+
     Ok(())
 }
 
@@ -71,7 +73,7 @@ async fn main() -> Result<()> {
     let cancel_token = CancellationToken::new();
 
     info!("Nota.Core start");
-    session::manager::load().await?;
+    session::load().await?;
     let _ = tokio::spawn(connect::serve(cancel_token.clone()));
 
     cancel_token.cancelled().await;

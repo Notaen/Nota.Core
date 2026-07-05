@@ -3,26 +3,29 @@ use std::{path::PathBuf, str::FromStr as _};
 use anyhow::{Context as _, Ok, Result};
 use chrono::Utc;
 use db::{Message, Metadata, Schedule};
-use sqlx::{Connection as _, SqliteConnection, sqlite::SqliteConnectOptions};
+use sqlx::{Connection as _, SqliteConnection, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
 
-use crate::base_dir;
+use crate::BASE_DIR;
 
-pub mod db;
-pub mod manager;
+pub use manager::{SessionManager, load, SM};
+
+mod db;
+mod manager;
 mod participant;
 
+#[derive(Debug)]
 pub struct Session {
     pub metadata: Metadata,
     pub messages: Vec<Message>,
     pub schedules: Vec<Schedule>,
 
-    pub conn: SqliteConnection,
+    pub db_url: String,
 }
 
 impl Session {
-    async fn load(path: &PathBuf) -> Result<Self> {
-        let url = format!("sqlite://{}", path.to_str().unwrap());
-        let mut conn = SqliteConnection::connect(&url).await?;
+    async fn load_from(path: &PathBuf) -> Result<Self> {
+        let db_url = format!("sqlite://{}", path.to_str().unwrap());
+        let mut conn = SqliteConnection::connect(db_url.as_str()).await?;
 
         let res = (async || {
             let metadata = Metadata::get(&mut conn).await?;
@@ -33,11 +36,12 @@ impl Session {
                 metadata,
                 messages,
                 schedules,
-                conn,
+                db_url,
             })
         })()
         .await;
 
+        // TODO: add error handling, like struct error
         // if let Err(ref e) = res {
         //     tracing::error!(
         //         "Failed to load session from {}: {e:?}",
@@ -48,32 +52,32 @@ impl Session {
         res
     }
 
-    pub async fn new(session_id: &str, creator: &str) -> Result<Self> {
-        let file_path = base_dir()
+    pub async fn new(session_id: String, creator: String) -> Result<Self> {
+        let db_path = BASE_DIR
             .join("sessions")
-            .join(format!("{}.sqlite", session_id));
-        if file_path.exists() {
-            anyhow::bail!("Session database already exists: {}", file_path.display());
+            .join(format!("{}.sqlite", &session_id));
+        if db_path.exists() {
+            anyhow::bail!("Session database already exists: {}", db_path.display());
         }
 
-        let url = format!("sqlite://{}", file_path.to_str().unwrap());
-        let options = SqliteConnectOptions::from_str(&url)?.create_if_missing(true);
+        let db_url = format!("sqlite://{}", db_path.to_string_lossy());
 
-        // 4. 建立连接
-        let mut conn = SqliteConnection::connect_with(&options).await?;
+        // create and open the db
+        let options = SqliteConnectOptions::from_str(db_url.as_str())?.create_if_missing(true);
+        // TODO: Perhaps it can be persistent
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
 
         // 5. 运行迁移（建表）
         sqlx::migrate!("./migrations")
-            .run(&mut conn)
+            .run(&pool)
             .await
             .context("Failed to run migrations")?;
 
         // 6. 构建初始 metadata
-        let now = Utc::now();
         let metadata = Metadata {
-            session_id: session_id.to_string(),
-            creator: creator.to_string(),
-            created_at: now,
+            session_id: session_id,
+            creator: creator,
+            created_at: Utc::now(),
             archive_at: None,
         };
 
@@ -84,22 +88,24 @@ impl Session {
         .bind(&metadata.session_id)
         .bind(&metadata.creator)
         .bind(metadata.created_at.timestamp()) // DateTime -> i64 (Unix 秒)
-        .bind::<Option<i64>>(None) // archive_at = NULL
-        .execute(&mut conn)
+        .bind(None::<i64>) // archive_at = NULL
+        .execute(&pool)
         .await
         .context("Failed to insert session metadata")?;
 
         // 8. 构造 Session 实例
         Ok(Self {
             metadata,
-            messages: Vec::new(),  // 新会话无消息
-            schedules: Vec::new(), // 新会话无计划
-            conn,
+            messages: Vec::new(),
+            schedules: Vec::new(),
+            db_url,
         })
     }
 
     pub async fn insert_message(&mut self, mut msg: Message) -> Result<i64> {
         anyhow::ensure!(msg.id == -1, "msg.id should == -1");
+
+        let mut conn = SqliteConnection::connect(&self.db_url).await?;
 
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO messages (timestamp, content, role, tag) VALUES (?, ?, ?, ?) RETURNING id",
@@ -108,7 +114,7 @@ impl Session {
         .bind(&msg.content)
         .bind(&msg.role)
         .bind(&msg.tag) // Option<String> 自动映射为 NULL
-        .fetch_one(&mut self.conn)
+        .fetch_one(&mut conn)
         .await?;
 
         // Set right id and push new message

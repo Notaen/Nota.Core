@@ -19,7 +19,7 @@ tokio = { version = "1.52", features = ["rt-multi-thread"] }
 tokio-util = "0.7.18"
 toml = "1.1.2"
 tracing = "0.1.44"
-uuid = { version = "1", features = ["v4"] }
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["local-time"] }
+uuid = { version = "1", features = ["v4"] }
 walkdir = "2.5"
