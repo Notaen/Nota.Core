@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::LazyLock};
 
 pub mod config;
 pub mod connect;
+pub mod persona;
 pub mod session;
 
 static BASE_DIR: LazyLock<PathBuf> = LazyLock::new(|| dirs::home_dir().unwrap().join(".nota"));

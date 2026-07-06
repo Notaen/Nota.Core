@@ -30,20 +30,17 @@ async fn create_session(Json(payload): Json<CreateSession>) -> impl IntoResponse
     if creator.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({"error": "creator is required"})),
+            Json(serde_json::json!({"error": "creator is required"})),
         );
     }
 
     match SM.get().unwrap().new_session(creator).await {
-        Ok(sid) => (
-            StatusCode::CREATED,
-            axum::Json(serde_json::json!({"sid": sid})),
-        ),
+        Ok(sid) => (StatusCode::CREATED, Json(serde_json::json!({"sid": sid}))),
         Err(e) => {
             tracing::error!("Failed to create session: {e:?}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "Failed to create session"})),
+                Json(serde_json::json!({"error": "Failed to create session"})),
             )
         }
     }
@@ -75,13 +72,12 @@ async fn set_archive_at(
         // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`
         Some(s) => {
             s.metadata.archive_at = payload.archive_at;
-            StatusCode::OK.into_response()
+            (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
         }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response(),
+        ),
     }
 }
 

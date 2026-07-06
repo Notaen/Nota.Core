@@ -1,7 +1,7 @@
 use std::fs::create_dir_all;
 
 use anyhow::Result;
-use nota_core::{base_dir, config, connect, session};
+use nota_core::{base_dir, config, connect, persona, session};
 use time::macros::format_description;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -18,7 +18,7 @@ use tracing_subscriber::{
 fn ensure_dir() -> Result<()> {
     create_dir_all(base_dir())?;
     create_dir_all(base_dir().join(".logs"))?;
-    create_dir_all(base_dir().join("persona"))?;
+    create_dir_all(base_dir().join("personas"))?;
     create_dir_all(base_dir().join("sessions"))?;
     create_dir_all(base_dir().join("sessions").join("archive"))?;
 
@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
     let cancel_token = CancellationToken::new();
 
     info!("Nota.Core start");
-    session::load().await?;
+    persona::manager::init().await?;
+    session::manager::load().await?;
     let _ = tokio::spawn(connect::serve(cancel_token.clone()));
 
     cancel_token.cancelled().await;

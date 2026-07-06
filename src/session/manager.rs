@@ -6,6 +6,7 @@ use tokio::{fs, sync::RwLock};
 
 use crate::{
     BASE_DIR, base_dir,
+    persona::handler::PersonaHandler,
     session::{Session, db::Metadata},
 };
 
@@ -20,11 +21,12 @@ impl SessionManager {
     pub async fn new_session(&self, creator: String) -> anyhow::Result<String> {
         let sid = uuid::Uuid::new_v4().to_string();
 
-        let new_session = Session::new(sid.clone(), creator).await?;
+        let mut session = Session::new(sid.clone(), creator).await?;
+        session.handlers.push(Box::new(PersonaHandler::new()));
         self.session_map
             .write()
             .await
-            .insert(sid.clone(), new_session);
+            .insert(sid.clone(), session);
         Ok(sid)
     }
 
@@ -108,6 +110,14 @@ pub async fn load() -> anyhow::Result<()> {
     .unwrap();
 
     tracing::info!("SessionManager loaded");
+
+    // Inject PersonaHandler into all loaded sessions
+    let manager = SM.get().unwrap();
+    let mut guard = manager.session_map.write().await;
+    for session in guard.values_mut() {
+        session.handlers.push(Box::new(PersonaHandler::new()));
+    }
+    tracing::info!("Default handlers injected into all sessions");
     Ok(())
 }
 
