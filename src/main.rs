@@ -1,8 +1,8 @@
 use std::fs::create_dir_all;
 
 use anyhow::Result;
+use chrono::Local;
 use nota_core::{base_dir, config, connect, persona, session};
-use time::macros::format_description;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_appender::{
@@ -11,9 +11,18 @@ use tracing_appender::{
 };
 use tracing_subscriber::{
     filter::LevelFilter,
-    fmt::{self, time::LocalTime},
+    fmt::{self, format::Writer, time::FormatTime},
     prelude::*,
 };
+
+#[derive(Clone)]
+struct ChronoLocalTimer;
+
+impl FormatTime for ChronoLocalTimer {
+    fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", Local::now().format("%Y-%m-%d %H:%M:%S"))
+    }
+}
 
 fn ensure_dir() -> Result<()> {
     create_dir_all(base_dir())?;
@@ -26,9 +35,7 @@ fn ensure_dir() -> Result<()> {
 }
 
 fn init_tracing() -> Result<non_blocking::WorkerGuard> {
-    // 本地时区：年-月-日 时:分:秒
-    let time_fmt = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
-    let timer = LocalTime::new(time_fmt);
+    let timer = ChronoLocalTimer;
 
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
@@ -53,7 +60,7 @@ fn init_tracing() -> Result<non_blocking::WorkerGuard> {
         .with_target(false)
         .with_file(false)
         .with_line_number(false)
-        .with_ansi(false) // 文件不要彩色转义码
+        .with_ansi(false)
         .with_filter(LevelFilter::DEBUG);
 
     tracing_subscriber::registry()
@@ -72,13 +79,13 @@ async fn main() -> Result<()> {
 
     let cancel_token = CancellationToken::new();
 
-    info!("Nota.Core start");
-    persona::manager::init().await?;
+    info!("Nota.Core started");
+    persona::init().await?;
     session::manager::load().await?;
     let _ = tokio::spawn(connect::serve(cancel_token.clone()));
 
     cancel_token.cancelled().await;
-    info!("Nota.Core is stopping");
+    info!("Nota.Core is shutting down");
 
     Ok(())
 }

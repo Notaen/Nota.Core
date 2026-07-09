@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::session::SM;
+use crate::session::SessionManager;
 
 #[derive(Deserialize)]
 struct CreateSession {
@@ -20,7 +20,7 @@ struct SetArchiveAt {
 }
 
 async fn list_metadata() -> impl IntoResponse {
-    let metadata = SM.get().unwrap().list_metadata().await;
+    let metadata = SessionManager::get().list_metadata().await;
     (StatusCode::OK, Json(metadata))
 }
 
@@ -33,7 +33,7 @@ async fn create_session(Json(payload): Json<CreateSession>) -> impl IntoResponse
         );
     }
 
-    match SM.get().unwrap().new_session(creator).await {
+    match SessionManager::get().new_session(creator).await {
         Ok(sid) => (StatusCode::CREATED, Json(serde_json::json!({"sid": sid}))),
         Err(e) => {
             tracing::error!("Failed to create session: {e:?}");
@@ -46,7 +46,7 @@ async fn create_session(Json(payload): Json<CreateSession>) -> impl IntoResponse
 }
 
 async fn get_archive_at(Path(sid): Path<String>) -> impl IntoResponse {
-    let session_map = SM.get().unwrap().session_map.read().await;
+    let session_map = SessionManager::get().session_map.read().await;
     let session = session_map.get(&sid);
     match session {
         // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`
@@ -65,7 +65,7 @@ async fn set_archive_at(
     Path(sid): Path<String>,
     Json(payload): Json<SetArchiveAt>,
 ) -> impl IntoResponse {
-    let mut session_map = SM.get().unwrap().session_map.write().await;
+    let mut session_map = SessionManager::get().session_map.write().await;
     let session = session_map.get_mut(&sid);
     match session {
         // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`

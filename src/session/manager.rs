@@ -6,10 +6,10 @@ use tokio::{fs, sync::RwLock};
 use crate::{
     BASE_DIR, base_dir,
     persona::handler::PersonaHandler,
-    session::{Session, db::Metadata},
+    session::{Session, Metadata},
 };
 
-pub static SM: OnceLock<SessionManager> = OnceLock::new();
+static SM: OnceLock<SessionManager> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct SessionManager {
@@ -17,6 +17,10 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    pub fn get() -> &'static SessionManager {
+        SM.get().unwrap()
+    }
+
     pub async fn new_session(&self, creator: String) -> anyhow::Result<String> {
         let sid = uuid::Uuid::new_v4().to_string();
 

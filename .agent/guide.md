@@ -79,7 +79,7 @@ pub archive_at: Option<i64>,
 ## SQLx / SQLite
 
 - Each session gets its own `SqlitePool` with `max_connections(1)`.
-- `sqlx::migrate!("./migrations")` runs on session creation.
+- `sqlx::migrate!("./assets/migrations")` runs on session creation.
 - New session DBs: `SqliteConnectOptions::from_str(...)?.create_if_missing(true)`.
 
 ## API Endpoints
@@ -95,9 +95,8 @@ pub archive_at: Option<i64>,
 
 ## Pitfalls
 
-1. **Never delete comments** — Chinese comments may be self-criticism or important context.
+1. **Chinese comments are authoritative** — they may be self-criticism, TODOs, or rules. If a comment describes a concrete fix, implement it and record the decision in `.agent/notes.md`. Never delete a comment without understanding why it was there.
 2. **crudly/sqlx version lock** — crudly 0.6 depends on sqlx 0.9. Don't upgrade sqlx without checking.
 3. **`InsertNoId` / `InsertWithoutId` consume self** — clone before insert.
 4. **`SelectAll` vs `SelectAllNoId`** — `NoId` types use `SelectAllNoId`; types with `#[crudly(id)]` use `SelectAll`.
 5. **`Metadata` is a singleton** — `Metadata::get()` enforces exactly 1 row.
-6. **`participant.rs` is a placeholder** — don't touch unless asked.

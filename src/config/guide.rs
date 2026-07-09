@@ -7,7 +7,7 @@ use crate::config::{_save, Config};
 /// TODO
 pub fn interactive_config_init() -> Result<Config> {
     println!("==== Interactive Configuration Wizard ====");
-    println!("Config file missing, we will create a new one for you.\n");
+    println!("Config file missing, we'll create one for you.\n");
 
     let api_url: String = Input::new()
         .with_prompt("API Base URL")

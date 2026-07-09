@@ -42,7 +42,7 @@ pub async fn serve(cancel_token: CancellationToken) {
         .layer(middleware::from_fn(log_request));
 
     let listener = TcpListener::bind("127.0.0.1:2349").await.unwrap();
-    debug!("Server start at 127.0.0.1:2349");
+    debug!("Server listening on 127.0.0.1:2349");
 
     let shutdown_future = async move {
         cancel_token.cancelled().await;

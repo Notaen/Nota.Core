@@ -3,7 +3,7 @@ use std::{path::PathBuf, str::FromStr as _};
 use anyhow::{Context as _, Ok, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use db::{Message, Metadata, Schedule};
+use db::Schedule;
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
@@ -11,12 +11,12 @@ use sqlx::{
 
 use crate::BASE_DIR;
 
-// 还是不要暴露太多module，耦合太强了。但我还没想好怎么做
-pub mod db;
+mod db;
 pub mod manager;
 mod participant;
 
-pub use manager::SM;
+pub use db::{Message, Metadata};
+pub use manager::SessionManager;
 
 pub struct Session {
     pub metadata: Metadata,
@@ -75,7 +75,7 @@ impl Session {
             .await?;
 
         // 5. 运行迁移（建表）
-        sqlx::migrate!("./migrations")
+        sqlx::migrate!("./assets/migrations")
             .run(&pool)
             .await
             .context("Failed to run migrations")?;
@@ -121,7 +121,8 @@ impl Session {
 
     pub async fn set_archive_at(&mut self, at: Option<i64>) {
         self.metadata.archive_at = at;
-        SM.get().unwrap().archive_expired_sessions().await;
+        // 这有bug
+        SessionManager::get().archive_expired_sessions().await;
     }
 }
 

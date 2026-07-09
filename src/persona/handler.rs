@@ -1,8 +1,8 @@
+//! TODO: 该文件需重构，当前仅为测试
+
 use async_trait::async_trait;
 
-// 这引用太乱了，模块之前耦合太强了
-use crate::session::db::Message;
-use crate::session::SessionHandler;
+use crate::session::{Message, SessionHandler};
 
 use super::manager::PersonaManager;
 
@@ -20,6 +20,8 @@ impl LlmClient for StubLlm {
     }
 }
 
+const PERSONA_FILES: &[&str] = &["solo.md", "memory.md"];
+
 pub struct PersonaHandler;
 
 impl PersonaHandler {
@@ -31,23 +33,26 @@ impl PersonaHandler {
 #[async_trait]
 impl SessionHandler for PersonaHandler {
     async fn handle(&self, session_id: &str, messages: &[Message]) -> anyhow::Result<()> {
-        let persona = match PersonaManager::get_default() {
+        let manager = PersonaManager::get();
+
+        let persona_opt = manager.current_persona.read().await;
+        let persona = match persona_opt.as_ref() {
             Some(p) => p,
             None => return Ok(()),
         };
 
-        // 不止这两个文件哦
-        let solo = persona.read_solo().await?;
-        let memory = persona.read_memory().await?;
+        let mut parts = Vec::new();
+        for filename in PERSONA_FILES {
+            match persona.read_file(filename).await {
+                Ok(content) if !content.is_empty() => {
+                    parts.push(format!("# {filename}\n{content}"));
+                }
+                _ => {}
+            }
+        }
 
-        let system = if memory.is_empty() {
-            solo
-        } else {
-            format!("{}\n\n# Memory\n{}", solo, memory)
-        };
-
-        let llm = StubLlm;
-        let response = llm.chat(&system, messages).await?;
+        let system = parts.join("\n\n");
+        let response = manager.llm.chat(&system, messages).await?;
         tracing::info!("[PersonaHandler] session={session_id} response={response}");
         Ok(())
     }
