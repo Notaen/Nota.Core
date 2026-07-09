@@ -4,7 +4,10 @@ use anyhow::{Context as _, Ok, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use db::{Message, Metadata, Schedule};
-use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 
 use crate::BASE_DIR;
 
@@ -20,7 +23,6 @@ pub struct Session {
     pub messages: Vec<Message>,
     pub schedules: Vec<Schedule>,
     pub handlers: Vec<Box<dyn SessionHandler>>,
-    pub db_url: String,
     pub db_pool: SqlitePool,
 }
 
@@ -31,7 +33,6 @@ impl std::fmt::Debug for Session {
             .field("messages", &self.messages)
             .field("schedules", &self.schedules)
             .field("handlers", &self.handlers.len())
-            .field("db_url", &self.db_url)
             .finish()
     }
 }
@@ -40,34 +41,20 @@ impl Session {
     async fn load_from(path: &PathBuf) -> Result<Self> {
         let db_url = format!("sqlite://{}", path.to_str().unwrap());
         let pool = SqlitePool::connect(db_url.as_str()).await?;
-        // 你这搞了一个pool，就用了一个conn，你想干嘛？
-        let mut conn = pool.acquire().await?;
 
-        let res = (async || {
-            let metadata = Metadata::get(&mut conn).await?;
-            let messages = Message::load_all(&mut conn).await?;
-            let schedules = Schedule::load_all(&mut conn).await?;
+        use crudly::SelectAll;
 
-            Ok(Self {
-                metadata,
-                messages,
-                schedules,
-                handlers: Vec::new(),
-                db_url,
-                db_pool: pool,
-            })
-        })()
-        .await;
+        let metadata = Metadata::read_from(&pool).await?;
+        let messages = Message::select_all(&pool).await?;
+        let schedules = Schedule::select_all(&pool).await?;
 
-        // TODO: add error handling, like struct error
-        // if let Err(ref e) = res {
-        //     tracing::error!(
-        //         "Failed to load session from {}: {e:?}",
-        //         path.display()
-        //     );
-        // }
-
-        res
+        Ok(Self {
+            metadata,
+            messages,
+            schedules,
+            handlers: Vec::new(),
+            db_pool: pool,
+        })
     }
 
     pub async fn new(session_id: String, creator: String) -> Result<Self> {
@@ -82,8 +69,10 @@ impl Session {
 
         // create and open the db
         let options = SqliteConnectOptions::from_str(db_url.as_str())?.create_if_missing(true);
-        // TODO: Perhaps the pool can be persistent
-        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
 
         // 5. 运行迁移（建表）
         sqlx::migrate!("./migrations")
@@ -95,21 +84,13 @@ impl Session {
         let metadata = Metadata {
             session_id,
             creator,
-            created_at: Utc::now(),
+            created_at: Utc::now().timestamp(),
             archive_at: None,
         };
 
         // 7. 插入 metadata 到数据库
-        sqlx::query(
-            "INSERT INTO session_meta (session_id, creator, created_at, archive_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&metadata.session_id)
-        .bind(&metadata.creator)
-        .bind(metadata.created_at.timestamp()) // DateTime -> i64 (Unix 秒)
-        .bind(None::<i64>) // archive_at = NULL
-        .execute(&pool)
-        .await
-        .context("Failed to insert session metadata")?;
+        use crudly::InsertNoId;
+        metadata.clone().insert(&pool).await?;
 
         // 8. 构造 Session 实例
         Ok(Self {
@@ -117,27 +98,14 @@ impl Session {
             messages: Vec::new(),
             schedules: Vec::new(),
             handlers: Vec::new(),
-            db_url,
             db_pool: pool,
         })
     }
 
-    pub async fn insert_message(&mut self, mut msg: Message) -> Result<i64> {
-        anyhow::ensure!(msg.id == -1, "msg.id should == -1");
-
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO messages (timestamp, content, role, tag) VALUES (?, ?, ?, ?) RETURNING id",
-        )
-        .bind(&msg.timestamp)
-        .bind(&msg.content)
-        .bind(&msg.role)
-        .bind(&msg.tag)
-        .fetch_one(&self.db_pool)
-        .await?;
-
-        // Set right id and push new message
-        msg.id = id;
-        self.messages.push(msg);
+    pub async fn insert_message(&mut self, msg: Message) -> Result<i64> {
+        use crudly::InsertWithoutId;
+        let id = msg.clone().insert(&self.db_pool).await?;
+        self.messages.push(Message { id, ..msg });
 
         // Fire session handlers
         let session_id = self.metadata.session_id.clone();
@@ -149,6 +117,11 @@ impl Session {
         }
 
         Ok(id)
+    }
+
+    pub async fn set_archive_at(&mut self, at: Option<i64>) {
+        self.metadata.archive_at = at;
+        SM.get().unwrap().archive_expired_sessions().await;
     }
 }
 

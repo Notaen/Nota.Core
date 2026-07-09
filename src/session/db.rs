@@ -1,30 +1,33 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sqlx::{SqliteConnection, prelude::FromRow};
+use serde::Serialize;
+use sqlx::prelude::FromRow;
 
-#[derive(Debug, Deserialize, Serialize, FromRow, Clone)]
+#[derive(Debug, Serialize, FromRow, Clone, crudly::IntoRow, crudly::Schema)]
+#[crudly(table = "session_meta")]
 pub struct Metadata {
     pub session_id: String,
     pub creator: String,
-    pub created_at: DateTime<Utc>,
-    pub archive_at: Option<DateTime<Utc>>,
+    pub created_at: i64,
+    pub archive_at: Option<i64>,
 }
 
 impl Metadata {
-    pub async fn get(conn: &mut SqliteConnection) -> Result<Self, sqlx::Error> {
-        let row: Metadata = sqlx::query_as(
-            "SELECT session_id, creator, created_at, archive_at FROM session_meta LIMIT 1",
-        )
-        .fetch_one(conn)
-        .await?;
-
-        Ok(row)
+    pub async fn read_from(pool: &sqlx::SqlitePool) -> Result<Self, sqlx::Error> {
+        use crudly::SelectAllNoId;
+        let all: Vec<Self> = Self::select_all(pool).await?;
+        if all.len() != 1 {
+            return Err(sqlx::Error::Protocol(
+                format!("session_meta must contain exactly 1 row, found {}", all.len()).into(),
+            ));
+        }
+        Ok(all.into_iter().next().unwrap())
     }
 }
 
-#[derive(Debug, FromRow)]
+impl crudly::CrudlyDefault for Metadata {} 
+
+#[derive(Debug, FromRow, Clone, crudly::IntoRow, crudly::Schema)]
 pub struct Message {
-    /// message id. Set to -1 only when used for insertion
+    #[crudly(id)]
     pub id: i64,
     pub timestamp: i64,
     pub content: String,
@@ -32,37 +35,17 @@ pub struct Message {
     pub tag: Option<String>,
 }
 
-impl Message {
-    pub async fn load_all(conn: &mut SqliteConnection) -> Result<Vec<Self>, sqlx::Error> {
-        let messages = sqlx::query_as(
-            "SELECT id, timestamp, content, role, tag FROM messages ORDER BY timestamp",
-        )
-        .fetch_all(conn)
-        .await?;
+impl crudly::CrudlyDefault for Message {}
 
-        Ok(messages)
-    }
-}
-
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, crudly::Schema)]
 pub struct Schedule {
-    /// schedule id. Set to -1 only when used for insertion
+    #[crudly(id)]
     pub id: i64,
     pub message: String,
     pub next_run_at: i64,
-    pub interval_seconds: Option<i64>, // NULL -> 单次任务
-    pub status: String,                // "active", "paused", "completed"
+    pub interval_seconds: Option<i64>,
+    pub status: String,
     pub created_at: i64,
 }
 
-impl Schedule {
-    pub async fn load_all(conn: &mut SqliteConnection) -> Result<Vec<Self>, sqlx::Error> {
-        let schedules = sqlx::query_as(
-            "SELECT id, message, next_run_at, interval_seconds, status, created_at FROM schedules",
-        )
-        .fetch_all(conn)
-        .await?;
-
-        Ok(schedules)
-    }
-}
+impl crudly::CrudlyDefault for Schedule {}

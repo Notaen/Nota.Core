@@ -5,7 +5,6 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::session::SM;
@@ -17,7 +16,7 @@ struct CreateSession {
 
 #[derive(Deserialize)]
 struct SetArchiveAt {
-    archive_at: Option<DateTime<Utc>>,
+    archive_at: Option<i64>,
 }
 
 async fn list_metadata() -> impl IntoResponse {
@@ -71,7 +70,7 @@ async fn set_archive_at(
     match session {
         // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`
         Some(s) => {
-            s.metadata.archive_at = payload.archive_at;
+            s.set_archive_at(payload.archive_at).await;
             (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
         }
         None => (

@@ -1,7 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
 
 use anyhow::Ok;
-use chrono::Utc;
 use tokio::{fs, sync::RwLock};
 
 use crate::{
@@ -36,23 +35,22 @@ impl SessionManager {
             .remove(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found in memory: {}", session_id))?;
 
-        let src = session
-            .db_url
-            .strip_prefix("sqlite://")
-            .ok_or_else(|| anyhow::anyhow!("Invalid session db_url: {}", session.db_url))?;
+        let option = session.db_pool.connect_options();
+        let src = option.get_filename();
         let dst_dir = BASE_DIR.join("sessions").join("archive");
         let dst = dst_dir.join(format!("{}.sqlite", session_id));
-        fs::rename(&src, &dst).await?;
+        fs::rename(src, dst).await?;
 
         tracing::info!("Archived session {session_id}");
         Ok(())
     }
 
+    // TODO：现在的逻辑有问题，调用后会卡住
     pub async fn archive_expired_sessions(&self) {
         let expired_ids = {
             let session_map = self.session_map.read().await;
 
-            let now = Utc::now();
+            let now = chrono::Utc::now().timestamp();
             session_map
                 .iter()
                 .filter_map(|(id, session)| {

@@ -290,6 +290,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crudly"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77e6f7805d80649c7338fc732bdbe09a85e42c6b90167603245740b25a6fdf3f"
+dependencies = [
+ "crudly-macros",
+ "sqlx",
+]
+
+[[package]]
+name = "crudly-macros"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2908cfb329b5f3435ab94c0d27b6df228f29b9f6d9b85778e8bb9a66690986a8"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1005,6 +1027,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "crudly",
  "dialoguer",
  "dirs",
  "futures-util",
