@@ -1,0 +1,88 @@
+use std::sync::Arc;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use tokio::sync::RwLock;
+
+use crate::session::{Message, SessionHandler};
+
+const SOLO_FILENAME: &str = "solo.md";
+const MEMORY_FILENAME: &str = "memory.md";
+const PERSONA_FILES: &[&str] = &[SOLO_FILENAME, MEMORY_FILENAME];
+
+/// A persona is, at the domain level, just a name. Where its files live is an
+/// infrastructure concern handled by [`PersonaStore`].
+#[derive(Debug, Clone)]
+pub struct Persona {
+    pub name: String,
+}
+
+/// Port for reading/writing persona workspace files.
+#[async_trait]
+pub trait PersonaStore: Send + Sync {
+    /// Read a file (`solo.md`, `memory.md`, ...) belonging to a persona.
+    async fn read_persona_file(&self, name: &str, filename: &str) -> Result<String>;
+
+    /// Create a persona workspace (idempotent: seeds default files when absent).
+    async fn create_persona(&self, name: &str) -> Result<()>;
+}
+
+/// Port for chat completion. Infrastructure supplies real/stub clients.
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    async fn chat(&self, system: &str, messages: &[Message]) -> Result<String>;
+}
+
+/// Owns the active persona and reacts to session messages by building a system
+/// prompt from the persona's files and delegating to an [`LlmClient`].
+///
+/// Replaces the old split `PersonaManager` + `PersonaHandler`; the handler role
+/// is now filled by implementing [`SessionHandler`] directly.
+pub struct PersonaManager {
+    store: Arc<dyn PersonaStore>,
+    llm: Arc<dyn LlmClient>,
+    current_persona: RwLock<Option<Persona>>,
+}
+
+impl PersonaManager {
+    pub fn new(store: Arc<dyn PersonaStore>, llm: Arc<dyn LlmClient>) -> Self {
+        Self {
+            store,
+            llm,
+            current_persona: RwLock::new(None),
+        }
+    }
+
+    pub async fn set_persona(&self, persona: Option<Persona>) {
+        *self.current_persona.write().await = persona;
+    }
+
+    pub async fn current_persona_name(&self) -> Option<String> {
+        self.current_persona.read().await.as_ref().map(|p| p.name.clone())
+    }
+}
+
+#[async_trait]
+impl SessionHandler for PersonaManager {
+    async fn handle(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+        let persona_name = match self.current_persona_name().await {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+
+        let mut parts = Vec::new();
+        for filename in PERSONA_FILES {
+            match self.store.read_persona_file(&persona_name, filename).await {
+                Ok(content) if !content.is_empty() => {
+                    parts.push(format!("# {filename}\n{content}"));
+                }
+                _ => {}
+            }
+        }
+
+        let system = parts.join("\n\n");
+        let response = self.llm.chat(&system, messages).await?;
+        log::info!("[PersonaHandler] session={session_id} response={response}");
+        Ok(())
+    }
+}

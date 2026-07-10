@@ -1,19 +1,25 @@
-use axum::{
-    Json, Router, extract::Request, http::StatusCode, middleware, response::Response, routing::get,
-};
+use std::sync::Arc;
 
+use axum::{
+    Json, Router,
+    extract::Request,
+    http::StatusCode,
+    middleware,
+    response::Response,
+    routing::get,
+};
+use nota_core::session::SessionManager;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-
-async fn log_request(req: Request, next: middleware::Next) -> Response {
-    debug!("Received: {} {}", req.method(), req.uri());
-    next.run(req).await
-}
 
 mod admin;
 mod session;
+
+async fn log_request(req: Request, next: middleware::Next) -> Response {
+    log::debug!("Received: {} {}", req.method(), req.uri());
+    next.run(req).await
+}
 
 async fn root() -> (StatusCode, &'static str) {
     (StatusCode::NOT_FOUND, "Not Found")
@@ -33,16 +39,21 @@ async fn health() -> (StatusCode, Json<Health<'static>>) {
     )
 }
 
-pub async fn serve(cancel_token: CancellationToken) {
-    let app = Router::new()
+/// Build the HTTP application router bound to an injected [`SessionManager`].
+pub fn router(state: Arc<SessionManager>, cancel_token: CancellationToken) -> Router<()> {
+    Router::<Arc<SessionManager>>::new()
         .route("/", get(root))
         .route("/health", get(health))
         .nest("/admin", admin::router(cancel_token.clone()))
         .nest("/session", session::router())
-        .layer(middleware::from_fn(log_request));
+        .layer(middleware::from_fn(log_request))
+        .with_state(state)
+}
 
-    let listener = TcpListener::bind("127.0.0.1:2349").await.unwrap();
-    debug!("Server listening on 127.0.0.1:2349");
+/// Serve the application until `cancel_token` is cancelled (graceful shutdown).
+pub async fn serve(listener: TcpListener, state: Arc<SessionManager>, cancel_token: CancellationToken) {
+    let app = router(state, cancel_token.clone());
+    log::debug!("Server listening on {}", listener.local_addr().unwrap());
 
     let shutdown_future = async move {
         cancel_token.cancelled().await;

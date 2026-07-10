@@ -51,3 +51,41 @@
 
 ### English/Grammar Cleanup
 - Log messages and user-facing strings should be idiomatic English.
+
+## Hexagonal Refactor (workspace split)
+
+The project was restructured into a Cargo workspace (`nota-core` / `nota-infra` /
+`nota-cli`) using ports & adapters. Key decisions:
+
+### Domain Purity (nota-core)
+- Core entities (`Metadata`, `Message`, `Schedule`, `Persona`, `Session`) carry
+  **no** `crudly::*` / `sqlx::FromRow` derives. Persistence row structs with
+  those derives live only in `nota-infra/src/sqlite/row.rs`, bridged to core via
+  `From` impls.
+- `Session` no longer holds a `SqlitePool`; persistence is delegated to the
+  `SessionRepository` port injected into `SessionManager`.
+- `nota-core` `Cargo.toml` must NOT contain sqlx/crudly/axum/tracing/dialoguer/
+  dirs/walkdir/tracing-subscriber.
+
+### No Global State (DI)
+- Removed `OnceLock<SessionManager>`, `OnceLock<PersonaManager>`, and
+  `static BASE_DIR`. Managers take their ports (`Arc<dyn SessionRepository>`,
+  `Arc<dyn PersonaStore>`, `Arc<dyn LlmClient>`) via constructors; `nota-cli`
+  wires adapters in `main` and injects them.
+- `PersonaManager` merged the old `PersonaHandler` and now `impl SessionHandler`
+  directly; it is registered as the default handler via
+  `SessionManager::register_handler_all`.
+- `base_dir()` is resolved in `nota-cli` (`dirs::home_dir().join(".nota")`) and
+  passed into adapters; the core never touches paths.
+
+### Logging Boundary
+- `nota-core`/`nota-infra` use the `log` facade only (`log::*`). `nota-cli` uses
+  `tracing` + `tracing-log` (`LogTracer::init()`) to route `log` records into
+  the tracing subscriber. Do not call `tracing::*` from core/infra.
+
+### Deadlock Fix (DI side-effect)
+- `set_archive_at` previously held `session_map.write()` then reentered the
+  global `SessionManager::get().archive_expired_sessions()` — a reentrant
+  deadlock. DI removed the global singleton, so the reentry is gone. The
+  `// 这有bug` comment is retained with an explanatory addendum. Archive
+  scheduling redesign is out of scope.
