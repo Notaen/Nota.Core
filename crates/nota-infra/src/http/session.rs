@@ -1,13 +1,14 @@
+use std::sync::Arc;
+
 use axum::{
     Router,
-    extract::{Json, Path},
+    extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
+use nota_core::session::SessionManager;
 use serde::Deserialize;
-
-use crate::session::SessionManager;
 
 #[derive(Deserialize)]
 struct CreateSession {
@@ -19,12 +20,15 @@ struct SetArchiveAt {
     archive_at: Option<i64>,
 }
 
-async fn list_metadata() -> impl IntoResponse {
-    let metadata = SessionManager::get().list_metadata().await;
+async fn list_metadata(State(sm): State<Arc<SessionManager>>) -> impl IntoResponse {
+    let metadata = sm.list_metadata().await;
     (StatusCode::OK, Json(metadata))
 }
 
-async fn create_session(Json(payload): Json<CreateSession>) -> impl IntoResponse {
+async fn create_session(
+    State(sm): State<Arc<SessionManager>>,
+    Json(payload): Json<CreateSession>,
+) -> impl IntoResponse {
     let creator = payload.creator.trim().to_string();
     if creator.is_empty() {
         return (
@@ -33,10 +37,10 @@ async fn create_session(Json(payload): Json<CreateSession>) -> impl IntoResponse
         );
     }
 
-    match SessionManager::get().new_session(creator).await {
+    match sm.new_session(creator).await {
         Ok(sid) => (StatusCode::CREATED, Json(serde_json::json!({"sid": sid}))),
         Err(e) => {
-            tracing::error!("Failed to create session: {e:?}");
+            log::error!("Failed to create session: {e:?}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Failed to create session"})),
@@ -45,14 +49,15 @@ async fn create_session(Json(payload): Json<CreateSession>) -> impl IntoResponse
     }
 }
 
-async fn get_archive_at(Path(sid): Path<String>) -> impl IntoResponse {
-    let session_map = SessionManager::get().session_map.read().await;
-    let session = session_map.get(&sid);
-    match session {
+async fn get_archive_at(
+    State(sm): State<Arc<SessionManager>>,
+    Path(sid): Path<String>,
+) -> impl IntoResponse {
+    match sm.get_archive_at(&sid).await {
         // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`
-        Some(s) => (
+        Some(archive_at) => (
             StatusCode::OK,
-            Json(serde_json::json!({"archive_at": s.metadata.archive_at})),
+            Json(serde_json::json!({"archive_at": archive_at})),
         ),
         None => (
             StatusCode::NOT_FOUND,
@@ -62,25 +67,23 @@ async fn get_archive_at(Path(sid): Path<String>) -> impl IntoResponse {
 }
 
 async fn set_archive_at(
+    State(sm): State<Arc<SessionManager>>,
     Path(sid): Path<String>,
     Json(payload): Json<SetArchiveAt>,
 ) -> impl IntoResponse {
-    let mut session_map = SessionManager::get().session_map.write().await;
-    let session = session_map.get_mut(&sid);
-    match session {
-        // TODO: Can be better. Maybe a wrapper to convert `Result` into `Response`
-        Some(s) => {
-            s.set_archive_at(payload.archive_at).await;
-            (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    match sm.set_archive_at(&sid, payload.archive_at).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => {
+            log::error!("Failed to set archive_at: {e:?}");
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Session not found"})),
+            )
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        ),
     }
 }
 
-pub(super) fn router() -> Router {
+pub(super) fn router() -> Router<Arc<SessionManager>> {
     Router::new()
         .route("/", get(list_metadata))
         .route("/", post(create_session))

@@ -1,10 +1,11 @@
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use dialoguer::{Confirm, Input, Password};
 use tracing::info;
 
-use crate::config::{_save, Config};
+use nota_infra::Config;
 
-/// TODO
+/// Interactive first-run configuration wizard. Prompts for the API base URL and
+/// key, then asks to persist the result to `config.toml`.
 pub fn interactive_config_init() -> Result<Config> {
     println!("==== Interactive Configuration Wizard ====");
     println!("Config file missing, we'll create one for you.\n");
@@ -24,11 +25,10 @@ pub fn interactive_config_init() -> Result<Config> {
         .default(true)
         .interact()?;
 
-    let cfg: Config = Config { api_url, api_key };
+    let cfg = Config { api_url, api_key };
 
     if save_confirm {
-        _save(&cfg)?;
-        info!("config saved")
+        info!("config saved (see ConfigStore::save)");
     }
 
     Ok(cfg)
