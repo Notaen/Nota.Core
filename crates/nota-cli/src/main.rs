@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Local;
+use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -22,10 +23,23 @@ use tracing_subscriber::{
 use nota_core::persona::PersonaManager;
 use nota_core::session::{SessionHandler, SessionManager};
 use nota_infra::{
-    ConfigStore, FilePersonaStore, StubLlm, SqliteSessionRepository, http_serve,
+    ConfigStore, FilePersonaStore, OpenAiLlm, SqliteSessionRepository, http_serve,
 };
 
 mod config_wizard;
+
+#[derive(Parser)]
+#[command(name = "nota", about = "AI agent session framework")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the interactive configuration wizard to set up or modify API settings.
+    Onboard,
+}
 
 #[derive(Clone)]
 struct ChronoLocalTimer;
@@ -46,8 +60,6 @@ fn ensure_dir(base: &Path) -> Result<()> {
 }
 
 fn init_tracing(base: &Path) -> Result<non_blocking::WorkerGuard> {
-    // Bridge the `log` facade (used by nota-core/nota-infra) into tracing so a
-    // single subscriber formats every record.
     LogTracer::init().ok();
 
     let timer = ChronoLocalTimer;
@@ -60,7 +72,6 @@ fn init_tracing(base: &Path) -> Result<non_blocking::WorkerGuard> {
 
     let (non_blocking_writer, guard) = non_blocking(file_appender);
 
-    // 控制台层：彩色、精简字段、INFO级别
     let console_layer = fmt::layer()
         .with_timer(timer.clone())
         .with_target(false)
@@ -68,7 +79,6 @@ fn init_tracing(base: &Path) -> Result<non_blocking::WorkerGuard> {
         .with_line_number(false)
         .with_filter(LevelFilter::INFO);
 
-    // 文件层：关闭颜色、精简字段、DEBUG级别
     let file_layer = fmt::layer()
         .with_writer(non_blocking_writer)
         .with_timer(timer)
@@ -87,48 +97,40 @@ fn init_tracing(base: &Path) -> Result<non_blocking::WorkerGuard> {
     Ok(guard)
 }
 
-fn load_config(store: &ConfigStore) -> Result<()> {
+fn load_or_create_config(store: &ConfigStore) -> Result<nota_infra::Config> {
     match store.load() {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(store.get().unwrap()),
         Err(e) => {
             tracing::warn!("The config.toml doesn't exist or failed to load: {e}");
-            let cfg = config_wizard::interactive_config_init()?;
+            let cfg = config_wizard::run_wizard(None)?;
             store.set(cfg.clone());
             store.save(&cfg)?;
-            Ok(())
+            info!("Config saved");
+            Ok(cfg)
         }
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let base = dirs::home_dir().unwrap().join(".nota");
-    ensure_dir(&base)?;
-    let _guard = init_tracing(&base)?;
-
-    let config_store = ConfigStore::new(&base);
-    load_config(&config_store)?;
-
-    let cancel_token = CancellationToken::new();
-
-    info!("Nota started");
-
-    // --- Dependency wiring -------------------------------------------------
-    let repo = Arc::new(SqliteSessionRepository::new(base.clone()));
-    let session_manager = SessionManager::new(repo);
+async fn run_server(base: &Path, config: nota_infra::Config, cancel_token: CancellationToken) -> Result<()> {
+    let repo = Arc::new(SqliteSessionRepository::new(base.to_path_buf()));
+    let session_manager = Arc::new(SessionManager::new(repo));
     session_manager.load_all().await?;
 
-    let persona_store = Arc::new(FilePersonaStore::new(&base));
-    let llm = Arc::new(StubLlm);
-    let persona_manager = Arc::new(PersonaManager::new(persona_store, llm));
+    let persona_store = Arc::new(FilePersonaStore::new(base));
+    let llm = Arc::new(OpenAiLlm::new(
+        &config.api_url,
+        &config.api_key,
+        &config.model,
+    ));
+    let persona_manager = Arc::new(PersonaManager::new(
+        persona_store,
+        llm,
+        session_manager.clone(),
+    ));
 
-    // PersonaManager doubles as the default SessionHandler for every session.
     let handler: Arc<dyn SessionHandler> = persona_manager.clone();
     session_manager.register_handler_all(handler).await?;
 
-    let session_manager = Arc::new(session_manager);
-
-    // --- HTTP driving adapter ---------------------------------------------
     let addr: SocketAddr = "127.0.0.1:2349".parse()?;
     let listener = TcpListener::bind(addr).await?;
     tokio::spawn(http_serve(
@@ -139,6 +141,32 @@ async fn main() -> Result<()> {
 
     cancel_token.cancelled().await;
     info!("Nota is shutting down");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let base = dirs::home_dir().unwrap().join(".nota");
+    ensure_dir(&base)?;
+    let _guard = init_tracing(&base)?;
+
+    let config_store = ConfigStore::new(&base);
+
+    match cli.command {
+        Some(Command::Onboard) => {
+            let existing = config_store.load().ok().and_then(|_| config_store.get());
+            let cfg = config_wizard::run_wizard(existing.as_ref())?;
+            config_store.save(&cfg)?;
+            info!("Configuration updated");
+        }
+        None => {
+            info!("Nota started");
+            let cancel_token = CancellationToken::new();
+            let config = load_or_create_config(&config_store)?;
+            run_server(&base, config, cancel_token).await?;
+        }
+    }
 
     Ok(())
 }

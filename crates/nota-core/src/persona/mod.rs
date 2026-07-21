@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::session::{Message, SessionHandler};
+use crate::session::{Message, SessionHandler, SessionManager};
 
 const SOLO_FILENAME: &str = "solo.md";
 const MEMORY_FILENAME: &str = "memory.md";
@@ -41,14 +41,20 @@ pub trait LlmClient: Send + Sync {
 pub struct PersonaManager {
     store: Arc<dyn PersonaStore>,
     llm: Arc<dyn LlmClient>,
+    sessions: Arc<SessionManager>,
     current_persona: RwLock<Option<Persona>>,
 }
 
 impl PersonaManager {
-    pub fn new(store: Arc<dyn PersonaStore>, llm: Arc<dyn LlmClient>) -> Self {
+    pub fn new(
+        store: Arc<dyn PersonaStore>,
+        llm: Arc<dyn LlmClient>,
+        sessions: Arc<SessionManager>,
+    ) -> Self {
         Self {
             store,
             llm,
+            sessions,
             current_persona: RwLock::new(None),
         }
     }
@@ -65,6 +71,12 @@ impl PersonaManager {
 #[async_trait]
 impl SessionHandler for PersonaManager {
     async fn handle(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+        // 仅响应用户消息，避免对 assistant 回复再次触发 LLM 导致递归
+        let last_role = messages.last().map(|m| m.role.as_str());
+        if last_role != Some("user") {
+            return Ok(());
+        }
+
         let persona_name = match self.current_persona_name().await {
             Some(n) => n,
             None => return Ok(()),
@@ -81,8 +93,24 @@ impl SessionHandler for PersonaManager {
         }
 
         let system = parts.join("\n\n");
+
+        // 把除最后一条（刚插入的用户消息）以外的消息作为上下文传给 LLM，
+        // 因为 messages 已经包含了刚入库的用户消息。
         let response = self.llm.chat(&system, messages).await?;
-        log::info!("[PersonaHandler] session={session_id} response={response}");
+
+        let now = chrono::Utc::now().timestamp();
+        let assistant_msg = Message {
+            id: 0, // DB 会分配真正的 id
+            timestamp: now,
+            content: response,
+            role: "assistant".to_string(),
+            tag: None,
+        };
+
+        self.sessions
+            .insert_message(session_id, assistant_msg)
+            .await?;
+
         Ok(())
     }
 }

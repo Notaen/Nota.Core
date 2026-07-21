@@ -10,8 +10,11 @@ pub mod llm;
 pub mod persona_store;
 pub mod sqlite;
 
-pub use config::{Config, ConfigStore};
+pub use config::{
+    Config, ConfigStore,
+    provider_default_model, provider_ids, provider_name, provider_url,
+};
 pub use http::{router as http_router, serve as http_serve};
-pub use llm::StubLlm;
+pub use llm::OpenAiLlm;
 pub use persona_store::FilePersonaStore;
 pub use sqlite::SqliteSessionRepository;
