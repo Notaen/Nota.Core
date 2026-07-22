@@ -156,3 +156,61 @@ The project was restructured into a Cargo workspace (`nota-core` / `nota-infra` 
   deadlock. DI removed the global singleton, so the reentry is gone. The
   `// 这有bug` comment is retained with an explanatory addendum. Archive
   scheduling redesign is out of scope.
+
+## Persona + Event Bus + WebSocket (2026)
+
+Replaced the session/SQLite stack with an event-driven persona architecture.
+The whole `session` module and `SqliteSessionRepository` were deleted; chat
+state lives in `chatlog.json` per persona. The HTTP layer is now REST + WS
+on `127.0.0.1:2349`, and the web UI is a separate repo (`Notaen/Nota.Webui`)
+cloned as a git submodule.
+
+### BusEvent.target
+- `target: Option<String>` lets the HTTP layer route a user message to a
+  specific persona. `PersonaRuntime::run` filters by `target`:
+  `if let Some(t) = event.target && t != self.name { continue; }`.
+  When `target` is `None`, all personas receive the event (broadcast).
+
+### Permission flow
+- Tool wants to do something user must approve (e.g. file outside workspace)
+  → calls `ToolContext::request_permission(prompt)`.
+- That registers a oneshot in `PermissionRegistry` and sends a
+  `PermissionRequest` event on the bus with `parent_request_id` set to the
+  user request id.
+- The WS handler forwards it as `{type:"permission_needed", ...}` to the
+  matching client.
+- User clicks Allow/Deny → WS message → handler calls
+  `PermissionRegistry::resolve(id, approved)` directly (no bus event).
+- The tool's blocked await resumes; persona continues; final response
+  flows back as `{type:"message", ...}`.
+
+### Web UI as git submodule
+- `webui/` was extracted into its own repo (`Notaen/Nota.Webui`) and added
+  back to `Nota.Core` as a submodule pinned to a commit (gitlink mode
+  `160000`).
+- `.gitmodules` declares `url = https://github.com/Notaen/Nota.Webui.git` and
+  `branch = main`. Local `.git/config` keeps the working-tree URL so the
+  existing checkout still works; once the remote exists, normal
+  `git submodule update` will fetch from it.
+- `nota webui` is a separate subcommand serving `webui/dist/` on
+  `127.0.0.1:5173` via `tower-http::services::ServeDir` with SPA fallback
+  to `index.html`. Override via `NOTA_WEBUI_DIR`.
+
+### Default persona is gone
+- `nota` no longer auto-creates any persona on startup. It scans
+  `~/.nota/personas/` and starts one `PersonaRuntime` per directory that
+  has `solo.md`. Use `nota onboard` (wizard prompts for a name) or create
+  the directory by hand. The HTTP API also has `POST /api/personas`.
+
+### REST API for personas and settings
+- `GET/POST /api/personas`, `GET/DELETE /api/personas/:name`,
+  `GET/PUT /api/personas/:name/files/:filename`,
+  `GET /api/personas/:name/chatlog`, `GET/PUT /api/settings`.
+- `Config` is held in an `Arc<tokio::sync::RwLock<Config>>` inside
+  `ApiState`; `PUT /api/settings` updates the in-memory copy and persists
+  via `ConfigStore::save`.
+
+### axum `ws` feature
+- `axum = { workspace = true, features = ["ws"] }` is required in
+  `nota-infra` and `nota-cli` for the WebSocketUpgrade extractor. Without
+  it `axum::extract::ws::*` is a private module.

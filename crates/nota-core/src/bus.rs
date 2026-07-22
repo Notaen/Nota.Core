@@ -2,13 +2,77 @@ use std::sync::RwLock;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventKind {
+    Message,
+    PermissionRequest,
+}
+
 #[derive(Debug, Clone)]
 pub struct BusEvent {
+    pub kind: EventKind,
     pub sender: String,
     pub content: String,
     pub timestamp: i64,
     pub context: String,
     pub request_id: Option<String>,
+    pub parent_request_id: Option<String>,
+    pub target: Option<String>,
+}
+
+impl BusEvent {
+    pub fn message(
+        sender: String,
+        content: String,
+        request_id: Option<String>,
+    ) -> Self {
+        Self {
+            kind: EventKind::Message,
+            sender,
+            content,
+            timestamp: chrono::Utc::now().timestamp(),
+            context: String::new(),
+            request_id,
+            parent_request_id: None,
+            target: None,
+        }
+    }
+
+    pub fn targeted_message(
+        sender: String,
+        content: String,
+        request_id: Option<String>,
+        target: String,
+    ) -> Self {
+        Self {
+            kind: EventKind::Message,
+            sender,
+            content,
+            timestamp: chrono::Utc::now().timestamp(),
+            context: String::new(),
+            request_id,
+            parent_request_id: None,
+            target: Some(target),
+        }
+    }
+
+    pub fn permission_request(
+        sender: String,
+        prompt: String,
+        permission_id: String,
+        parent_request_id: Option<String>,
+    ) -> Self {
+        Self {
+            kind: EventKind::PermissionRequest,
+            sender,
+            content: prompt,
+            timestamp: chrono::Utc::now().timestamp(),
+            context: String::new(),
+            request_id: Some(permission_id),
+            parent_request_id,
+            target: None,
+        }
+    }
 }
 
 pub struct EventBus {
@@ -26,6 +90,10 @@ impl EventBus {
         let (tx, rx) = mpsc::unbounded_channel();
         self.senders.write().unwrap().push(tx);
         rx
+    }
+
+    pub fn subscribe_with_sender(&self, tx: UnboundedSender<BusEvent>) {
+        self.senders.write().unwrap().push(tx);
     }
 
     pub fn send(&self, event: BusEvent) {

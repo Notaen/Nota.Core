@@ -1,19 +1,50 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
 
-#[derive(Debug, Clone)]
+use crate::bus::{BusEvent, EventBus, EventKind};
+use crate::permissions::PermissionRegistry;
+
+#[derive(Clone)]
 pub struct ToolContext {
     pub persona_name: String,
+    pub bus: Arc<EventBus>,
+    pub request_id: Option<String>,
+    pub permissions: Arc<PermissionRegistry>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("persona_name", &self.persona_name)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+
+impl ToolContext {
+    /// Send a permission request to the user and await their decision.
+    /// Returns `true` if approved, `false` if denied or on timeout.
+    pub async fn request_permission(&self, prompt: String) -> bool {
+        let (id, rx) = self.permissions.register().await;
+        self.bus.send(BusEvent::permission_request(
+            self.persona_name.clone(),
+            prompt,
+            id,
+            self.request_id.clone(),
+        ));
+        rx.await.unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolParams {
     #[serde(rename = "type")]
     pub schema_type: String,
-    pub properties: std::collections::HashMap<String, PropertyDef>,
+    pub properties: HashMap<String, PropertyDef>,
     pub required: Vec<String>,
 }
 
@@ -28,7 +59,7 @@ pub struct PropertyDef {
 
 impl ToolParams {
     pub fn object(
-        properties: std::collections::HashMap<String, PropertyDef>,
+        properties: HashMap<String, PropertyDef>,
         required: Vec<String>,
     ) -> Self {
         Self {
@@ -54,3 +85,7 @@ pub trait ToolRegistry: Send + Sync {
     fn get(&self, name: &str) -> Option<Arc<dyn Tool>>;
     fn list(&self) -> Vec<Arc<dyn Tool>>;
 }
+
+// Keep EventKind import to suppress unused warning on rebuilds
+#[allow(dead_code)]
+fn _ensure_event_kind_used(_: EventKind) {}

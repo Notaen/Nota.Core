@@ -57,9 +57,9 @@ impl FilePersonaStore {
         }
     }
 
-    fn invalidate_cache(&self, path: &Path) {
+    async fn invalidate_cache(&self, path: &Path) {
         if let Some(cache) = PERSONA_FILE_CACHE.get() {
-            cache.blocking_write().remove(path);
+            cache.write().await.remove(path);
         }
     }
 }
@@ -82,7 +82,7 @@ impl PersonaStore for FilePersonaStore {
     ) -> Result<()> {
         let path = self.workspace(name).join(filename);
         tokio::fs::write(&path, content).await?;
-        self.invalidate_cache(&path);
+        self.invalidate_cache(&path).await;
         Ok(())
     }
 
@@ -103,6 +103,14 @@ impl PersonaStore for FilePersonaStore {
         Ok(())
     }
 
+    async fn delete_persona(&self, name: &str) -> Result<()> {
+        let workspace = self.workspace(name);
+        if tokio::fs::try_exists(&workspace).await.unwrap_or(false) {
+            tokio::fs::remove_dir_all(&workspace).await?;
+        }
+        Ok(())
+    }
+
     async fn append_chatlog(&self, name: &str, entries: &[ChatLogEntry]) -> Result<()> {
         let path = self.workspace(name).join(CHATLOG_FILENAME);
         let mut existing: Vec<ChatLogEntry> = match self.read_cached(&path).await? {
@@ -112,7 +120,7 @@ impl PersonaStore for FilePersonaStore {
         existing.extend(entries.iter().cloned());
         let json = serde_json::to_string(&existing)?;
         tokio::fs::write(&path, &json).await?;
-        self.invalidate_cache(&path);
+        self.invalidate_cache(&path).await;
         Ok(())
     }
 

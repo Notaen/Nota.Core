@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentRunner;
 use crate::bus::{BusEvent, EventBus};
 use crate::llm::{ChatMessage, LlmClient};
+use crate::permissions::PermissionRegistry;
 use crate::tool::{ToolContext, ToolRegistry};
 
 const SOLO_FILENAME: &str = "solo.md";
@@ -35,6 +36,8 @@ pub trait PersonaStore: Send + Sync {
 
     async fn create_persona(&self, name: &str) -> Result<()>;
 
+    async fn delete_persona(&self, name: &str) -> Result<()>;
+
     async fn append_chatlog(&self, name: &str, entries: &[ChatLogEntry]) -> Result<()>;
 
     async fn read_chatlog(&self, name: &str, since: Option<i64>) -> Result<Vec<ChatLogEntry>>;
@@ -47,6 +50,7 @@ pub struct PersonaRuntime {
     store: Arc<dyn PersonaStore>,
     llm: Arc<dyn LlmClient>,
     registry: Arc<dyn ToolRegistry>,
+    permissions: Arc<PermissionRegistry>,
 }
 
 impl PersonaRuntime {
@@ -55,12 +59,14 @@ impl PersonaRuntime {
         store: Arc<dyn PersonaStore>,
         llm: Arc<dyn LlmClient>,
         registry: Arc<dyn ToolRegistry>,
+        permissions: Arc<PermissionRegistry>,
     ) -> Self {
         Self {
             persona,
             store,
             llm,
             registry,
+            permissions,
         }
     }
 
@@ -82,6 +88,11 @@ impl PersonaRuntime {
             if event.sender == name {
                 continue;
             }
+            if let Some(ref t) = event.target {
+                if t != &name {
+                    continue;
+                }
+            }
 
             let system = self.build_system_prompt().await;
 
@@ -100,6 +111,9 @@ impl PersonaRuntime {
 
             let tool_ctx = ToolContext {
                 persona_name: name.clone(),
+                bus: bus.clone(),
+                request_id: event.request_id.clone(),
+                permissions: self.permissions.clone(),
             };
 
             let _ = self
@@ -143,13 +157,11 @@ impl PersonaRuntime {
                         && let Some(content) = &last.content
                         && last.role == "assistant"
                     {
-                        bus.send(BusEvent {
-                            sender: name.clone(),
-                            content: content.clone(),
-                            timestamp: now,
-                            context: String::new(),
-                            request_id: event.request_id.clone(),
-                        });
+                        bus.send(BusEvent::message(
+                            name.clone(),
+                            content.clone(),
+                            event.request_id.clone(),
+                        ));
                     }
                 }
                 Err(e) => {

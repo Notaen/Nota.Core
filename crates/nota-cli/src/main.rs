@@ -1,6 +1,6 @@
 use std::fs::create_dir_all;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -21,10 +21,11 @@ use tracing_subscriber::{
 };
 
 use nota_core::bus::EventBus;
+use nota_core::permissions::PermissionRegistry;
 use nota_core::persona::{Persona, PersonaRuntime, PersonaStore};
 use nota_infra::{
-    ConfigStore, FilePersonaStore, OpenAiLlm, ToolRegistryImpl,
-    http_serve, register_builtin_tools, run_dispatcher,
+    ApiState, AppContext, ConfigStore, FilePersonaStore, OpenAiLlm, ToolRegistryImpl,
+    http_serve, register_builtin_tools,
 };
 use nota_runtime::PluginManager;
 
@@ -40,6 +41,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Onboard,
+    Webui,
 }
 
 #[derive(Clone)]
@@ -117,8 +119,9 @@ async fn run_server(
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let bus = Arc::new(EventBus::new());
+    let permissions = Arc::new(PermissionRegistry::new());
 
-    let persona_store = Arc::new(FilePersonaStore::new(base));
+    let persona_store: Arc<dyn PersonaStore> = Arc::new(FilePersonaStore::new(base));
     let llm: Arc<dyn nota_core::llm::LlmClient> = Arc::new(OpenAiLlm::new(
         &config.api_url,
         &config.api_key,
@@ -128,10 +131,7 @@ async fn run_server(
     let tool_registry: Arc<ToolRegistryImpl> = Arc::new(ToolRegistryImpl::new());
     register_builtin_tools(&tool_registry, base.join("personas"));
 
-    let _plugin_manager = PluginManager::new(
-        base.join("plugins"),
-        tool_registry.clone(),
-    );
+    let _plugin_manager = PluginManager::new(base.join("plugins"), tool_registry.clone());
 
     let persona_names = persona_store.list_personas().await?;
     if persona_names.is_empty() {
@@ -145,6 +145,7 @@ async fn run_server(
             persona_store.clone(),
             llm.clone(),
             tool_registry.clone(),
+            permissions.clone(),
         ));
 
         let persona_loop_bus = bus.clone();
@@ -156,35 +157,89 @@ async fn run_server(
         info!("Persona '{}' started", name);
     }
 
-    let dispatcher_bus = bus.clone();
-    tokio::spawn(async move {
-        run_dispatcher(dispatcher_bus).await;
+    let config_path = base.join("config.toml");
+    let config_arc = Arc::new(tokio::sync::RwLock::new(config));
+    let api_state = Arc::new(ApiState {
+        persona_store,
+        config: config_arc,
+        config_path,
+    });
+
+    let ctx = Arc::new(AppContext {
+        bus: bus.clone(),
+        permissions: permissions.clone(),
+        api_state,
     });
 
     let addr: SocketAddr = "127.0.0.1:2349".parse()?;
     let listener = TcpListener::bind(addr).await?;
-    tokio::spawn(http_serve(
-        listener,
-        bus.clone(),
-        cancel_token.clone(),
-    ));
+    info!("nota server listening on http://{}", addr);
+    tokio::spawn(http_serve(listener, ctx, cancel_token.clone()));
 
     cancel_token.cancelled().await;
     info!("Nota is shutting down");
     Ok(())
 }
 
+async fn run_webui(cancel_token: CancellationToken) -> Result<()> {
+    let dir = locate_webui_dist()?;
+    info!("Serving web UI from {}", dir.display());
+
+    let addr: SocketAddr = "127.0.0.1:5173".parse()?;
+    let listener = TcpListener::bind(addr).await?;
+
+    let serve_dir = tower_http::services::ServeDir::new(&dir)
+        .precompressed_gzip()
+        .fallback(tower_http::services::ServeFile::new(dir.join("index.html")));
+
+    let app = axum::Router::new().fallback_service(serve_dir);
+    info!("Web UI available at http://{}", addr);
+
+    let shutdown = async move {
+        cancel_token.cancelled().await;
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .ok();
+
+    Ok(())
+}
+
+fn locate_webui_dist() -> Result<PathBuf> {
+    if let Ok(env) = std::env::var("NOTA_WEBUI_DIR") {
+        let p = PathBuf::from(env);
+        if p.join("index.html").exists() {
+            return Ok(p);
+        }
+    }
+    let candidates = [
+        PathBuf::from("webui/dist"),
+        PathBuf::from("../webui/dist"),
+        PathBuf::from("../../webui/dist"),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| p.join("index.html").exists())
+        .ok_or_else(|| anyhow::anyhow!("could not locate webui/dist. Run `bun run build` in webui/ first."))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let base = dirs::home_dir().unwrap().join(".nota");
-    ensure_dir(&base)?;
-    let _guard = init_tracing(&base)?;
-
-    let config_store = ConfigStore::new(&base);
+    let _guard = if !matches!(cli.command, Some(Command::Webui)) {
+        ensure_dir(&base)?;
+        Some(init_tracing(&base)?)
+    } else {
+        None
+    };
 
     match cli.command {
         Some(Command::Onboard) => {
+            ensure_dir(&base)?;
+            let config_store = ConfigStore::new(&base);
             let existing = config_store.load().ok().and_then(|_| config_store.get());
             let cfg = config_wizard::run_wizard(existing.as_ref())?;
             config_store.save(&cfg)?;
@@ -195,8 +250,14 @@ async fn main() -> Result<()> {
             persona_store.create_persona(&persona_name).await?;
             info!("Persona '{}' created", persona_name);
         }
+        Some(Command::Webui) => {
+            let cancel_token = CancellationToken::new();
+            run_webui(cancel_token).await?;
+        }
         None => {
             info!("Nota started");
+            ensure_dir(&base)?;
+            let config_store = ConfigStore::new(&base);
             let cancel_token = CancellationToken::new();
             let config = load_or_create_config(&config_store)?;
             run_server(&base, config, cancel_token).await?;

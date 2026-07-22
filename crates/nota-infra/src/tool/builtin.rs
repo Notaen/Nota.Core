@@ -54,10 +54,35 @@ impl Tool for FileReadTool {
         let workspace = self.workspace(&ctx.persona_name);
         let resolved = workspace.join(rel);
 
-        let canonical = tokio::fs::canonicalize(&resolved).await?;
         let workspace_canonical = tokio::fs::canonicalize(&workspace).await?;
+        let canonical = match tokio::fs::canonicalize(&resolved).await {
+            Ok(c) => c,
+            Err(_) => {
+                if !resolved.starts_with(&workspace_canonical) {
+                    let prompt = format!(
+                        "{} wants to read outside its workspace: {}",
+                        ctx.persona_name,
+                        resolved.display()
+                    );
+                    let approved = ctx.request_permission(prompt).await;
+                    if !approved {
+                        anyhow::bail!("permission denied");
+                    }
+                }
+                tokio::fs::canonicalize(&resolved).await?
+            }
+        };
+
         if !canonical.starts_with(&workspace_canonical) {
-            anyhow::bail!("access denied: path outside persona workspace");
+            let prompt = format!(
+                "{} wants to read outside its workspace: {}",
+                ctx.persona_name,
+                resolved.display()
+            );
+            let approved = ctx.request_permission(prompt).await;
+            if !approved {
+                anyhow::bail!("permission denied");
+            }
         }
 
         let content = tokio::fs::read_to_string(&canonical).await?;
@@ -134,7 +159,15 @@ impl Tool for FileWriteTool {
         };
 
         if !target.starts_with(&canonical) && target != canonical {
-            anyhow::bail!("access denied: path outside persona workspace");
+            let prompt = format!(
+                "{} wants to write outside its workspace: {}",
+                ctx.persona_name,
+                resolved.display()
+            );
+            let approved = ctx.request_permission(prompt).await;
+            if !approved {
+                anyhow::bail!("permission denied");
+            }
         }
 
         if let Some(parent) = target.parent() {
