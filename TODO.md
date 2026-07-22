@@ -1,1 +1,2 @@
-- [ ] 升级API Provider选择
+- [ ] parameters 应该结构化保存
+- [ ] 优化插件设计

@@ -1,19 +1,53 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use nota_core::persona::LlmClient;
-use nota_core::session::Message;
+use nota_core::llm::{ChatMessage, LlmClient, LlmResponse, ToolCall, ToolDef};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
-struct ChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<ChatMessage<'a>>,
+struct ChatRequest {
+    model: String,
+    messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ApiTool>>,
 }
 
 #[derive(Serialize)]
-struct ChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
+struct WireMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<WireToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WireToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: WireToolCallFunction,
+}
+
+#[derive(Serialize)]
+struct WireToolCallFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize)]
+struct ApiTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: ApiToolFunction,
+}
+
+#[derive(Serialize)]
+struct ApiToolFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -28,10 +62,23 @@ struct Choice {
 
 #[derive(Deserialize)]
 struct ChoiceMessage {
-    content: String,
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ChatToolCall>,
 }
 
-/// OpenAI-compatible chat-completion client.
+#[derive(Deserialize)]
+struct ChatToolCall {
+    id: String,
+    function: ToolCallFunction,
+}
+
+#[derive(Deserialize)]
+struct ToolCallFunction {
+    name: String,
+    arguments: String,
+}
+
 pub struct OpenAiLlm {
     api_url: String,
     api_key: String,
@@ -52,26 +99,47 @@ impl OpenAiLlm {
 
 #[async_trait]
 impl LlmClient for OpenAiLlm {
-    async fn chat(&self, system: &str, messages: &[Message]) -> Result<String> {
+    async fn chat(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+    ) -> Result<LlmResponse> {
         let mut chat_messages: Vec<ChatMessage> = Vec::new();
 
         if !system.is_empty() {
             chat_messages.push(ChatMessage {
-                role: "system",
-                content: system,
+                role: "system".to_string(),
+                content: Some(system.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
             });
         }
 
-        for msg in messages {
-            chat_messages.push(ChatMessage {
-                role: &msg.role,
-                content: &msg.content,
-            });
-        }
+        chat_messages.extend(messages.iter().cloned());
+
+        let api_tools: Vec<ApiTool> = tools
+            .iter()
+            .map(|t| ApiTool {
+                tool_type: "function".to_string(),
+                function: ApiToolFunction {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: serde_json::to_value(&t.parameters)
+                        .unwrap_or(serde_json::Value::Null),
+                },
+            })
+            .collect();
+
+        let wire_messages: Vec<WireMessage> = chat_messages
+            .iter()
+            .map(to_wire_message)
+            .collect();
 
         let req = ChatRequest {
-            model: &self.model,
-            messages: chat_messages,
+            model: self.model.clone(),
+            messages: wire_messages,
+            tools: if api_tools.is_empty() { None } else { Some(api_tools) },
         };
 
         let url = format!("{}/chat/completions", self.api_url);
@@ -91,13 +159,43 @@ impl LlmClient for OpenAiLlm {
         }
 
         let chat_resp: ChatResponse = resp.json().await?;
-        let content = chat_resp
-            .choices
-            .into_iter()
-            .next()
-            .map(|c| c.message.content)
+        let choice = chat_resp.choices.into_iter().next();
+        let msg = choice.map(|c| c.message);
+
+        let content = msg.as_ref().and_then(|m| m.content.clone());
+        let tool_calls = msg
+            .map(|m| {
+                m.tool_calls
+                    .into_iter()
+                    .map(|tc| ToolCall {
+                        id: tc.id,
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
-        Ok(content)
+        Ok(LlmResponse { content, tool_calls })
+    }
+}
+
+fn to_wire_message(msg: &ChatMessage) -> WireMessage {
+    WireMessage {
+        role: msg.role.clone(),
+        content: msg.content.clone(),
+        tool_calls: msg.tool_calls.as_ref().map(|tcs| {
+            tcs.iter()
+                .map(|tc| WireToolCall {
+                    id: tc.id.clone(),
+                    tool_type: "function".to_string(),
+                    function: WireToolCallFunction {
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    },
+                })
+                .collect()
+        }),
+        tool_call_id: msg.tool_call_id.clone(),
     }
 }

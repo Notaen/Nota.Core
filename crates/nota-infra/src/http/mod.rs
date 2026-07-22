@@ -8,13 +8,13 @@ use axum::{
     response::Response,
     routing::get,
 };
-use nota_core::session::SessionManager;
+use nota_core::bus::EventBus;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-mod admin;
-mod session;
+pub(crate) mod admin;
+pub(crate) mod chat;
 
 async fn log_request(req: Request, next: middleware::Next) -> Response {
     log::debug!("Received: {} {}", req.method(), req.uri());
@@ -39,20 +39,22 @@ async fn health() -> (StatusCode, Json<Health<'static>>) {
     )
 }
 
-/// Build the HTTP application router bound to an injected [`SessionManager`].
-pub fn router(state: Arc<SessionManager>, cancel_token: CancellationToken) -> Router<()> {
-    Router::<Arc<SessionManager>>::new()
+pub fn router(state: Arc<EventBus>, cancel_token: CancellationToken) -> Router<()> {
+    Router::<Arc<EventBus>>::new()
         .route("/", get(root))
         .route("/health", get(health))
         .nest("/admin", admin::router(cancel_token.clone()))
-        .nest("/session", session::router())
+        .nest("/chat", chat::router())
         .layer(middleware::from_fn(log_request))
         .with_state(state)
 }
 
-/// Serve the application until `cancel_token` is cancelled (graceful shutdown).
-pub async fn serve(listener: TcpListener, state: Arc<SessionManager>, cancel_token: CancellationToken) {
-    let app = router(state, cancel_token.clone());
+pub async fn serve(
+    listener: TcpListener,
+    bus: Arc<EventBus>,
+    cancel_token: CancellationToken,
+) {
+    let app = router(bus, cancel_token.clone());
     log::debug!("Server listening on {}", listener.local_addr().unwrap());
 
     let shutdown_future = async move {

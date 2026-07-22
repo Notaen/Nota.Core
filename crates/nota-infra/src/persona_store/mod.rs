@@ -5,11 +5,12 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use nota_core::persona::PersonaStore;
+use nota_core::persona::{ChatLogEntry, PersonaStore};
 use tokio::sync::RwLock;
 
 const SOLO_FILENAME: &str = "solo.md";
 const MEMORY_FILENAME: &str = "memory.md";
+const CHATLOG_FILENAME: &str = "chatlog.json";
 
 type FileCache = HashMap<PathBuf, (String, SystemTime)>;
 
@@ -19,10 +20,6 @@ fn ensure_cache() -> &'static RwLock<FileCache> {
     PERSONA_FILE_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Filesystem-backed [`PersonaStore`].
-///
-/// Persona workspaces live under `<base_dir>/personas/<name>/`. File contents
-/// are cached keyed by path with mtime invalidation (write-through on read).
 pub struct FilePersonaStore {
     personas_dir: PathBuf,
 }
@@ -37,27 +34,56 @@ impl FilePersonaStore {
     fn workspace(&self, name: &str) -> PathBuf {
         self.personas_dir.join(name)
     }
+
+    async fn read_cached(&self, path: &Path) -> Result<Option<String>> {
+        match tokio::fs::metadata(path).await {
+            Ok(meta) => {
+                let mtime = meta.modified()?;
+                {
+                    let cache = ensure_cache().read().await;
+                    if let Some((content, cached_mtime)) = cache.get(path)
+                        && *cached_mtime == mtime
+                    {
+                        return Ok(Some(content.clone()));
+                    }
+                }
+                let content = tokio::fs::read_to_string(path).await?;
+                let mut cache = ensure_cache().write().await;
+                cache.insert(path.to_path_buf(), (content.clone(), mtime));
+                Ok(Some(content))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn invalidate_cache(&self, path: &Path) {
+        if let Some(cache) = PERSONA_FILE_CACHE.get() {
+            cache.blocking_write().remove(path);
+        }
+    }
 }
 
 #[async_trait]
 impl PersonaStore for FilePersonaStore {
     async fn read_persona_file(&self, name: &str, filename: &str) -> Result<String> {
         let path = self.workspace(name).join(filename);
-        let mtime = tokio::fs::metadata(&path).await?.modified()?;
-
-        {
-            let cache = ensure_cache().read().await;
-            if let Some((content, cached_mtime)) = cache.get(&path)
-                && *cached_mtime == mtime
-            {
-                return Ok(content.clone());
-            }
+        match self.read_cached(&path).await? {
+            Some(content) => Ok(content),
+            None => anyhow::bail!("persona file not found: {}/{}", name, filename),
         }
+    }
 
-        let content = tokio::fs::read_to_string(&path).await?;
-        let mut cache = ensure_cache().write().await;
-        cache.insert(path, (content.clone(), mtime));
-        Ok(content)
+    async fn write_persona_file(
+        &self,
+        name: &str,
+        filename: &str,
+        content: &str,
+    ) -> Result<()> {
+        let path = self.workspace(name).join(filename);
+        tokio::fs::write(&path, content).await?;
+        self.invalidate_cache(&path);
+        Ok(())
     }
 
     async fn create_persona(&self, name: &str) -> Result<()> {
@@ -75,5 +101,53 @@ impl PersonaStore for FilePersonaStore {
         }
 
         Ok(())
+    }
+
+    async fn append_chatlog(&self, name: &str, entries: &[ChatLogEntry]) -> Result<()> {
+        let path = self.workspace(name).join(CHATLOG_FILENAME);
+        let mut existing: Vec<ChatLogEntry> = match self.read_cached(&path).await? {
+            Some(content) => serde_json::from_str(&content).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        existing.extend(entries.iter().cloned());
+        let json = serde_json::to_string(&existing)?;
+        tokio::fs::write(&path, &json).await?;
+        self.invalidate_cache(&path);
+        Ok(())
+    }
+
+    async fn read_chatlog(
+        &self,
+        name: &str,
+        since: Option<i64>,
+    ) -> Result<Vec<ChatLogEntry>> {
+        let path = self.workspace(name).join(CHATLOG_FILENAME);
+        let content = match self.read_cached(&path).await? {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let entries: Vec<ChatLogEntry> =
+            serde_json::from_str(&content).unwrap_or_default();
+        if let Some(ts) = since {
+            Ok(entries.into_iter().filter(|e| e.timestamp >= ts).collect())
+        } else {
+            Ok(entries)
+        }
+    }
+
+    async fn list_personas(&self) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        let mut entries = tokio::fs::read_dir(&self.personas_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_dir() {
+                let solo_path = entry.path().join(SOLO_FILENAME);
+                if tokio::fs::try_exists(&solo_path).await.unwrap_or(false) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+        Ok(names)
     }
 }

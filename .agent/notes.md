@@ -52,6 +52,73 @@
 ### English/Grammar Cleanup
 - Log messages and user-facing strings should be idiomatic English.
 
+## Provider System
+
+### Built-in Providers (DeepSeek, OpenRouter, Custom)
+- Provider metadata (URL, default model) lives in `crates/nota-infra/assets/providers.toml`,
+  compiled in via `include_str!`. Used ONLY by the config wizard to pre-fill defaults.
+- Saved `config.toml` is flat: `api_url`, `api_key`, `model` — no provider type distinction at runtime.
+- The wizard (`config_wizard::run_wizard`) accepts an existing `Config` as defaults for editing.
+  Final config is displayed as a summary before saving.
+
+### `nota onboard` command
+- Uses `clap` derive. Runs the wizard standalone (no server start).
+- `nota` with no subcommand starts the server normally (auto-wizard if config missing).
+
+## Tool System (nota-core)
+
+### Domain types over generics
+- `ToolParams` + `PropertyDef` structs model JSON Schema directly, NOT `serde_json::Value`
+  or raw `String`. These are domain types with clear semantics, not serialization helpers.
+- `ToolParams::object(properties, required)` is the canonical constructor.
+- Serialization to actual JSON happens only in `nota-infra` (via `serde_json::to_value`).
+- This was the result of multiple review rounds:
+  1. First tried `serde_json::Value` (wrong — serialization lib in core)
+  2. Then tried `String` (wrong — lost type safety, unreadable)
+  3. Then tried custom `JsonValue` enum (wrong — still a generic container, not domain-specific)
+  4. Finally: `ToolParams` + `PropertyDef` (correct — models the domain)
+
+### AgentRunner
+- Tool calling loop: max 16 iterations, LLM → tool_calls → execute → append results → repeat.
+- `ToolDef` + `ToolCall` + `LlmResponse` types in `nota-core::llm`.
+- Tool calls/results stored as messages (`role: "tool_call"` / `"tool_result"`).
+- The runner returns all new messages; caller is responsible for persistence.
+
+### Built-in tools (nota-infra)
+- `file_read`, `file_write` — sandboxed to persona workspace (`canonicalize` path checks).
+- `schedule` — stub implementation (scheduler not yet built).
+- `get_version` — returns `env!("CARGO_PKG_VERSION")`.
+- Registered via `register_builtin_tools(registry, personas_dir)`.
+
+## Plugin System (nota-runtime)
+
+### Architecture
+- `deno_core 0.408` embeds V8. Each plugin gets its own `JsRuntime` (isolate).
+- `PluginManager`: scans `~/.nota/plugins/` for `plugin.json`, loads/dispatches/reloads.
+- **Embedded plugins**: compiled in via `include_str!` + `PluginInstance::load_from_memory()`
+  — NO filesystem seeding. User plugins loaded from disk.
+- Plugin lifecycle: `register → start → stop`. Hot reload: stop → new isolate → register → start.
+
+### NotaContext
+- JS plugins access `ctx.tool.register({name, description, parameters, run})` via deno_core ops.
+- Tool metadata is stored; tool execution through JS (async op bridge) is TODO.
+- `JsRuntime` is `Send` but NOT `Sync` — cannot be shared via `Arc<dyn Tool>`. Channel-based
+  dispatch needed for cross-thread tool execution.
+
+### deno_core patterns
+- `#[op2(fast)]` for sync native functions: `state: &mut OpState`, `#[string]` for strings.
+- OpDecl is obtained by calling the op function: `op_register_tool()` returns `OpDecl`.
+- V8 function references can be passed through ops: `run_fn: v8::Local<v8::Function>`.
+  Creating `v8::Global` requires `CallbackScope::new(&run_fn)`.
+
+## LLM Client (nota-infra)
+
+### OpenAiLlm
+- OpenAI-compatible chat completions API.
+- Request uses typed structs (`ChatMessage`, `ApiTool`), NOT raw `serde_json::Value` or `json!()`.
+- Tool role translation: `tool_call` → assistant with `tool_calls`, `tool_result` → tool with `tool_call_id`.
+- `ChatMessage` has optional `content`, `tool_calls`, `tool_call_id` fields.
+
 ## Hexagonal Refactor (workspace split)
 
 The project was restructured into a Cargo workspace (`nota-core` / `nota-infra` /

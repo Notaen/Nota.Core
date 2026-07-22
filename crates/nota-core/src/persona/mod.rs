@@ -2,115 +2,197 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
 
-use crate::session::{Message, SessionHandler, SessionManager};
+use crate::agent::AgentRunner;
+use crate::bus::{BusEvent, EventBus};
+use crate::llm::{ChatMessage, LlmClient};
+use crate::tool::{ToolContext, ToolRegistry};
 
 const SOLO_FILENAME: &str = "solo.md";
 const MEMORY_FILENAME: &str = "memory.md";
 const PERSONA_FILES: &[&str] = &[SOLO_FILENAME, MEMORY_FILENAME];
 
-/// A persona is, at the domain level, just a name. Where its files live is an
-/// infrastructure concern handled by [`PersonaStore`].
 #[derive(Debug, Clone)]
 pub struct Persona {
     pub name: String,
 }
 
-/// Port for reading/writing persona workspace files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatLogEntry {
+    pub sender: String,
+    pub content: String,
+    pub timestamp: i64,
+    pub context: String,
+}
+
 #[async_trait]
 pub trait PersonaStore: Send + Sync {
-    /// Read a file (`solo.md`, `memory.md`, ...) belonging to a persona.
     async fn read_persona_file(&self, name: &str, filename: &str) -> Result<String>;
 
-    /// Create a persona workspace (idempotent: seeds default files when absent).
+    async fn write_persona_file(&self, name: &str, filename: &str, content: &str)
+        -> Result<()>;
+
     async fn create_persona(&self, name: &str) -> Result<()>;
+
+    async fn append_chatlog(&self, name: &str, entries: &[ChatLogEntry]) -> Result<()>;
+
+    async fn read_chatlog(&self, name: &str, since: Option<i64>) -> Result<Vec<ChatLogEntry>>;
+
+    async fn list_personas(&self) -> Result<Vec<String>>;
 }
 
-/// Port for chat completion. Infrastructure supplies real/stub clients.
-#[async_trait]
-pub trait LlmClient: Send + Sync {
-    async fn chat(&self, system: &str, messages: &[Message]) -> Result<String>;
-}
-
-/// Owns the active persona and reacts to session messages by building a system
-/// prompt from the persona's files and delegating to an [`LlmClient`].
-///
-/// Replaces the old split `PersonaManager` + `PersonaHandler`; the handler role
-/// is now filled by implementing [`SessionHandler`] directly.
-pub struct PersonaManager {
+pub struct PersonaRuntime {
+    persona: Persona,
     store: Arc<dyn PersonaStore>,
     llm: Arc<dyn LlmClient>,
-    sessions: Arc<SessionManager>,
-    current_persona: RwLock<Option<Persona>>,
+    registry: Arc<dyn ToolRegistry>,
 }
 
-impl PersonaManager {
+impl PersonaRuntime {
     pub fn new(
+        persona: Persona,
         store: Arc<dyn PersonaStore>,
         llm: Arc<dyn LlmClient>,
-        sessions: Arc<SessionManager>,
+        registry: Arc<dyn ToolRegistry>,
     ) -> Self {
         Self {
+            persona,
             store,
             llm,
-            sessions,
-            current_persona: RwLock::new(None),
+            registry,
         }
     }
 
-    pub async fn set_persona(&self, persona: Option<Persona>) {
-        *self.current_persona.write().await = persona;
+    pub fn name(&self) -> &str {
+        &self.persona.name
     }
 
-    pub async fn current_persona_name(&self) -> Option<String> {
-        self.current_persona.read().await.as_ref().map(|p| p.name.clone())
-    }
-}
+    pub async fn run(self: Arc<Self>, bus: Arc<EventBus>) {
+        let mut rx = bus.subscribe();
+        let agent = AgentRunner::new(self.llm.clone(), self.registry.clone());
+        let name = self.persona.name.clone();
 
-#[async_trait]
-impl SessionHandler for PersonaManager {
-    async fn handle(&self, session_id: &str, messages: &[Message]) -> Result<()> {
-        // 仅响应用户消息，避免对 assistant 回复再次触发 LLM 导致递归
-        let last_role = messages.last().map(|m| m.role.as_str());
-        if last_role != Some("user") {
-            return Ok(());
+        loop {
+            let event = match rx.recv().await {
+                Some(e) => e,
+                None => break,
+            };
+
+            if event.sender == name {
+                continue;
+            }
+
+            let system = self.build_system_prompt().await;
+
+            let history = self
+                .load_chatlog_context()
+                .await
+                .unwrap_or_default();
+
+            let mut messages = history;
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: Some(event.content.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+
+            let tool_ctx = ToolContext {
+                persona_name: name.clone(),
+            };
+
+            let _ = self
+                .store
+                .append_chatlog(
+                    &name,
+                    &[ChatLogEntry {
+                        sender: event.sender.clone(),
+                        content: event.content.clone(),
+                        timestamp: event.timestamp,
+                        context: event.context.clone(),
+                    }],
+                )
+                .await;
+
+            match agent.run(&system, &messages, tool_ctx).await {
+                Ok(new_msgs) => {
+                    let mut chatlog_entries: Vec<ChatLogEntry> = Vec::new();
+                    let now = chrono::Utc::now().timestamp();
+
+                    for msg in &new_msgs {
+                        let role_str = &msg.role;
+                        let entry_content = msg
+                            .content
+                            .clone()
+                            .unwrap_or_else(|| format!("[{role_str}]"));
+                        chatlog_entries.push(ChatLogEntry {
+                            sender: name.clone(),
+                            content: entry_content.clone(),
+                            timestamp: now,
+                            context: String::new(),
+                        });
+                    }
+
+                    let _ = self
+                        .store
+                        .append_chatlog(&name, &chatlog_entries)
+                        .await;
+
+                    if let Some(last) = new_msgs.last()
+                        && let Some(content) = &last.content
+                        && last.role == "assistant"
+                    {
+                        bus.send(BusEvent {
+                            sender: name.clone(),
+                            content: content.clone(),
+                            timestamp: now,
+                            context: String::new(),
+                            request_id: event.request_id.clone(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    log::error!("Persona {} agent error: {e}", name);
+                }
+            }
         }
+    }
 
-        let persona_name = match self.current_persona_name().await {
-            Some(n) => n,
-            None => return Ok(()),
-        };
-
+    async fn build_system_prompt(&self) -> String {
+        let name = &self.persona.name;
         let mut parts = Vec::new();
         for filename in PERSONA_FILES {
-            match self.store.read_persona_file(&persona_name, filename).await {
+            match self.store.read_persona_file(name, filename).await {
                 Ok(content) if !content.is_empty() => {
                     parts.push(format!("# {filename}\n{content}"));
                 }
                 _ => {}
             }
         }
+        parts.join("\n\n")
+    }
 
-        let system = parts.join("\n\n");
-
-        // 把除最后一条（刚插入的用户消息）以外的消息作为上下文传给 LLM，
-        // 因为 messages 已经包含了刚入库的用户消息。
-        let response = self.llm.chat(&system, messages).await?;
-
-        let now = chrono::Utc::now().timestamp();
-        let assistant_msg = Message {
-            id: 0, // DB 会分配真正的 id
-            timestamp: now,
-            content: response,
-            role: "assistant".to_string(),
-            tag: None,
-        };
-
-        self.sessions
-            .insert_message(session_id, assistant_msg)
+    async fn load_chatlog_context(&self) -> Result<Vec<ChatMessage>> {
+        let entries = self
+            .store
+            .read_chatlog(&self.persona.name, None)
             .await?;
 
-        Ok(())
+        let mut messages = Vec::new();
+        for entry in entries {
+            let role = if entry.sender == self.persona.name {
+                "assistant"
+            } else {
+                "user"
+            };
+            messages.push(ChatMessage {
+                role: role.to_string(),
+                content: Some(entry.content),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+        Ok(messages)
     }
 }

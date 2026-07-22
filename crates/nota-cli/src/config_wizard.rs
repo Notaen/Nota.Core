@@ -131,3 +131,17 @@ fn mask_key(key: &str) -> String {
         format!("{}****{}", &key[..4], &key[key.len() - 4..])
     }
 }
+
+pub fn prompt_create_persona() -> Result<String> {
+    println!();
+    println!("Now let's create your first persona.");
+    println!("A persona is an AI identity with its own solo.md (system prompt)");
+    println!("and memory.md (persistent memory).\n");
+
+    let name: String = Input::new()
+        .with_prompt("Persona name")
+        .default("default".to_string())
+        .interact_text()?;
+
+    Ok(name)
+}

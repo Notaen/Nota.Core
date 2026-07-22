@@ -20,16 +20,18 @@ use tracing_subscriber::{
     prelude::*,
 };
 
-use nota_core::persona::PersonaManager;
-use nota_core::session::{SessionHandler, SessionManager};
+use nota_core::bus::EventBus;
+use nota_core::persona::{Persona, PersonaRuntime, PersonaStore};
 use nota_infra::{
-    ConfigStore, FilePersonaStore, OpenAiLlm, SqliteSessionRepository, http_serve,
+    ConfigStore, FilePersonaStore, OpenAiLlm, ToolRegistryImpl,
+    http_serve, register_builtin_tools, run_dispatcher,
 };
+use nota_runtime::PluginManager;
 
 mod config_wizard;
 
 #[derive(Parser)]
-#[command(name = "nota", about = "AI agent session framework")]
+#[command(name = "nota", about = "AI agent persona framework")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -37,7 +39,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the interactive configuration wizard to set up or modify API settings.
     Onboard,
 }
 
@@ -54,8 +55,7 @@ fn ensure_dir(base: &Path) -> Result<()> {
     create_dir_all(base)?;
     create_dir_all(base.join(".logs"))?;
     create_dir_all(base.join("personas"))?;
-    create_dir_all(base.join("sessions"))?;
-    create_dir_all(base.join("sessions").join("archive"))?;
+    create_dir_all(base.join("plugins"))?;
     Ok(())
 }
 
@@ -111,31 +111,61 @@ fn load_or_create_config(store: &ConfigStore) -> Result<nota_infra::Config> {
     }
 }
 
-async fn run_server(base: &Path, config: nota_infra::Config, cancel_token: CancellationToken) -> Result<()> {
-    let repo = Arc::new(SqliteSessionRepository::new(base.to_path_buf()));
-    let session_manager = Arc::new(SessionManager::new(repo));
-    session_manager.load_all().await?;
+async fn run_server(
+    base: &Path,
+    config: nota_infra::Config,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    let bus = Arc::new(EventBus::new());
 
     let persona_store = Arc::new(FilePersonaStore::new(base));
-    let llm = Arc::new(OpenAiLlm::new(
+    let llm: Arc<dyn nota_core::llm::LlmClient> = Arc::new(OpenAiLlm::new(
         &config.api_url,
         &config.api_key,
         &config.model,
     ));
-    let persona_manager = Arc::new(PersonaManager::new(
-        persona_store,
-        llm,
-        session_manager.clone(),
-    ));
 
-    let handler: Arc<dyn SessionHandler> = persona_manager.clone();
-    session_manager.register_handler_all(handler).await?;
+    let tool_registry: Arc<ToolRegistryImpl> = Arc::new(ToolRegistryImpl::new());
+    register_builtin_tools(&tool_registry, base.join("personas"));
+
+    let _plugin_manager = PluginManager::new(
+        base.join("plugins"),
+        tool_registry.clone(),
+    );
+
+    let persona_names = persona_store.list_personas().await?;
+    if persona_names.is_empty() {
+        tracing::warn!("No personas found in ~/.nota/personas/. Create one via the onboard wizard.");
+    }
+
+    for name in &persona_names {
+        let persona = Persona { name: name.clone() };
+        let runtime = Arc::new(PersonaRuntime::new(
+            persona,
+            persona_store.clone(),
+            llm.clone(),
+            tool_registry.clone(),
+        ));
+
+        let persona_loop_bus = bus.clone();
+        let persona_loop_runtime = runtime.clone();
+        tokio::spawn(async move {
+            persona_loop_runtime.run(persona_loop_bus).await;
+        });
+
+        info!("Persona '{}' started", name);
+    }
+
+    let dispatcher_bus = bus.clone();
+    tokio::spawn(async move {
+        run_dispatcher(dispatcher_bus).await;
+    });
 
     let addr: SocketAddr = "127.0.0.1:2349".parse()?;
     let listener = TcpListener::bind(addr).await?;
     tokio::spawn(http_serve(
         listener,
-        session_manager.clone(),
+        bus.clone(),
         cancel_token.clone(),
     ));
 
@@ -159,6 +189,11 @@ async fn main() -> Result<()> {
             let cfg = config_wizard::run_wizard(existing.as_ref())?;
             config_store.save(&cfg)?;
             info!("Configuration updated");
+
+            let persona_store = FilePersonaStore::new(&base);
+            let persona_name = config_wizard::prompt_create_persona()?;
+            persona_store.create_persona(&persona_name).await?;
+            info!("Persona '{}' created", persona_name);
         }
         None => {
             info!("Nota started");
